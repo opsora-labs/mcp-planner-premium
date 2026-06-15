@@ -226,8 +226,10 @@ Call: `describe_option_set` with:
 If Phase 2 was not selected or the user said NO to write mode, record all steps as
 `SKIP (write mode disabled)` and move to Phase 3.
 
-**Naming convention:** use `ZZ-MCP-TEST-<YYYYMMDD>` — clearly identifiable as a test plan.
-The plan cannot be deleted via the API — remind the user to remove it manually in the Planner UI.
+**Naming convention:** use `ZZ-MCP-TEST-<YYYYMMDD-HHmm>` (date plus the current hour and minute,
+e.g. `ZZ-MCP-TEST-20260615-1430`) — clearly identifiable as a test plan and unique per run, so
+multiple runs on the same day don't collide. The plan cannot be deleted via the API — remind the
+user to remove it manually in the Planner UI.
 
 ---
 
@@ -235,7 +237,7 @@ The plan cannot be deleted via the API — remind the user to remove it manually
 
 Call: `create_plan` with:
 ```json
-{ "subject": "ZZ-MCP-TEST-<YYYYMMDD>", "description": "MCP interactive test run — multi-bucket rich hierarchy" }
+{ "subject": "ZZ-MCP-TEST-<YYYYMMDD-HHmm>", "description": "MCP interactive test run — multi-bucket rich hierarchy" }
 ```
 
 **Pass criteria:** `ok: true`, `projectId` is a GUID.
@@ -804,7 +806,7 @@ Call: `apply_changes` with `{ "operationSetId": "<OP_SET_CLEAN>" }`
 
 **Pass criteria:** `taskCount` = 0 (or only Bucket 1 default remains, no tasks).
 
-**Residue:** The plan `ZZ-MCP-TEST-<date>` (and its 3 buckets) remains — remove manually in Planner UI.
+**Residue:** The plan `ZZ-MCP-TEST-<YYYYMMDD-HHmm>` (and its 3 buckets) remains — remove manually in Planner UI.
 
 ---
 
@@ -1015,7 +1017,7 @@ everything.
 | 2.16 | cancel change session | `cancel_change_session` | [✅/❌] | status=Abandoned (192350004), change not persisted |
 | 2.17 | cleanup (remaining 9 tasks + 2 dep entities) | `delete_tasks_batch` | [✅/❌] | taskCount=0 after verify |
 
-**Residue:** Plan `ZZ-MCP-TEST-<date>` (id: [projectId]) remains — 3 buckets + plan need manual removal in Planner UI.
+**Residue:** Plan `ZZ-MCP-TEST-<YYYYMMDD-HHmm>` (id: [projectId]) remains — 3 buckets + plan need manual removal in Planner UI.
 
 ---
 

@@ -3,7 +3,7 @@ import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
 import type { ToolDef } from "./types.js";
 
-const STATUS_MAP: Record<number, string> = {
+export const STATUS_MAP: Record<number, string> = {
   192350000: "Open",
   192350001: "Executing",
   192350002: "Failed",
