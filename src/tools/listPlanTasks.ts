@@ -12,6 +12,9 @@ interface FullTask extends RawTask {
   msdyn_priority?: number | null;
   msdyn_effort?: number | null;
   _msdyn_projectbucket_value?: string | null;
+  _msdyn_projectsprint_value?: string | null;
+  msdyn_projectbucket?: { msdyn_name?: string } | null;
+  msdyn_parenttask?: { msdyn_subject?: string } | null;
 }
 
 // Filtered task list for a plan. One scan, filtered client-side so 'overdue'
@@ -50,8 +53,10 @@ export const listPlanTasks: ToolDef = {
       BASE +
       "/msdyn_projecttasks?$select=msdyn_projecttaskid,msdyn_subject,msdyn_description," +
       "msdyn_start,msdyn_finish,msdyn_progress,msdyn_effort,msdyn_outlinelevel," +
-      "msdyn_ismilestone,msdyn_priority,msdyn_displaysequence,_msdyn_projectbucket_value," +
-      "_msdyn_parenttask_value&$filter=" +
+      "msdyn_ismilestone,msdyn_priority,msdyn_displaysequence," +
+      "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value" +
+      "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)" +
+      "&$filter=" +
       odata +
       "&$orderby=msdyn_displaysequence asc";
     const paged = await pageAll(url, readHeaders());
@@ -89,11 +94,15 @@ export const listPlanTasks: ToolDef = {
         typeof t.msdyn_progress === "number" ? Math.round(t.msdyn_progress * 100) : null,
       effortHours: t.msdyn_effort ?? null,
       outlineLevel: t.msdyn_outlinelevel ?? null,
+      displaySequence: t.msdyn_displaysequence ?? null,
       priority: t.msdyn_priority ?? null,
       isMilestone: t.msdyn_ismilestone === true,
       isSummary: summaryIds.has(String(t.msdyn_projecttaskid).toLowerCase()),
       bucketId: t._msdyn_projectbucket_value ?? null,
+      bucketName: t.msdyn_projectbucket?.msdyn_name ?? null,
       parentTaskId: t._msdyn_parenttask_value ?? null,
+      parentTaskSubject: t.msdyn_parenttask?.msdyn_subject ?? null,
+      sprintId: t._msdyn_projectsprint_value ?? null,
     }));
 
     return {
