@@ -133,6 +133,7 @@ Call: `get_task` with `{ "taskId": "<TEST_TASK_ID>" }`
 - `task.effortHours` is present (number or null)
 - `task.outlineLevel` is present (number or null)
 - `task.progressPercent` (if not null) is between 0 and 100
+- `task.isSummary` is a boolean (true if the task has children)
 - `predecessors` is an array
 - `successors` is an array
 - `assignments` is an array (each entry has `teamMemberId` and `name`)
@@ -590,7 +591,7 @@ everything.
 | 1.2 | find_plan_by_name | `find_plan_by_name` | [✅/❌/⏭️] | [count returned] |
 | 1.3 | get_plan_summary | `get_plan_summary` | [✅/❌/⏭️] | totalTasks=[N], progressPercent=[N] |
 | 1.4 | get_plan_tasks_and_buckets | `get_plan_tasks_and_buckets` | [✅/❌/⏭️] | [N] tasks, [N] buckets |
-| 1.5 | get_task | `get_task` | [✅/❌/⏭️] | isMilestone=[bool], bucketName=[str\|null], extended fields=[present\|absent] |
+| 1.5 | get_task | `get_task` | [✅/❌/⏭️] | isMilestone=[bool], isSummary=[bool], bucketName=[str\|null], extended fields=[present\|absent] |
 | 1.6a | list_plan_tasks (all) | `list_plan_tasks` | [✅/❌/⏭️] | [N] tasks, bucketName/parentTaskSubject present=[bool] |
 | 1.6b | list_plan_tasks (overdue) | `list_plan_tasks` | [✅/❌/⏭️] | [N] tasks |
 | 1.6c | list_plan_tasks (milestones) | `list_plan_tasks` | [✅/❌/⏭️] | [N] tasks |

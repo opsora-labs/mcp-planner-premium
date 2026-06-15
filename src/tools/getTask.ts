@@ -12,7 +12,7 @@ export const getTask: ToolDef = {
   name: "get_task",
   title: "Get Task",
   description:
-    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links and resource assignments (with member name). Dependency and assignment data may be omitted (with a warning) on environments where those columns differ - the core task fields always return.",
+    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, isSummary flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links and resource assignments (with member name). Dependency and assignment data may be omitted (with a warning) on environments where those columns differ - the core task fields always return.",
   inputSchema: {
     taskId: z.string().describe("GUID of the task (msdyn_projecttaskid)."),
   },
@@ -106,6 +106,31 @@ export const getTask: ToolDef = {
       warnings.push("Dependency read failed: " + (e instanceof Error ? e.message : String(e)));
     }
 
+    // isSummary: a task is a summary (parent) if at least one other task names it as
+    // its parent. A $top=1 child-check is the cheapest way to determine this for a
+    // single task without fetching the whole plan.
+    let isSummary = false;
+    try {
+      const childRes = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projecttasks?$select=msdyn_projecttaskid" +
+            "&$filter=_msdyn_parenttask_value eq " +
+            taskId +
+            "&$top=1",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (childRes.status < 400) {
+        isSummary = (childRes.json?.value?.length ?? 0) > 0;
+      }
+    } catch {
+      // Non-fatal — isSummary stays false
+    }
+
     // Resource assignments — expand the team member record for the display name.
     let assignments: any[] = [];
     try {
@@ -156,6 +181,7 @@ export const getTask: ToolDef = {
         outlineLevel: t.msdyn_outlinelevel ?? null,
         displaySequence: t.msdyn_displaysequence ?? null,
         isMilestone: t.msdyn_ismilestone === true,
+        isSummary,
         priority: t.msdyn_priority ?? null,
         bucketId: t._msdyn_projectbucket_value ?? null,
         bucketName: t.msdyn_projectbucket?.msdyn_name ?? null,
