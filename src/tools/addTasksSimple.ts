@@ -175,9 +175,13 @@ export function buildTaskEntities(
       // "undeclared property ... which only has property annotations ... but no
       // property value was found". The read side still uses the lowercase
       // _value alias (that is a different, value-side name).
+      // PSS requires the project bind on the dependency entity too. Without it
+      // the API defaults to the zero GUID (00000000-…) which it then rejects as
+      // not matching the operation set's project (ScheduleAPI-OV-0001).
       const depEnt: Record<string, unknown> = {
         "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency",
         msdyn_projecttaskdependencyid: randomUUID(),
+        "msdyn_project@odata.bind": "/msdyn_projects(" + projectId + ")",
         "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + predId + ")",
         "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + id + ")",
       };

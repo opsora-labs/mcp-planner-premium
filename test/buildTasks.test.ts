@@ -118,6 +118,9 @@ describe("buildTaskEntities", () => {
     const dep = built.entities.find((e) => e["@odata.type"] === DEP)!;
     expect(dep.msdyn_projecttaskdependencylinktype).toBe(192350001); // SS
     expect(dep.msdyn_linklagduration).toBe(120);
+    // PSS requires the project bind on the dependency entity too; without it
+    // the API defaults to the zero GUID and rejects with ScheduleAPI-OV-0001.
+    expect(dep["msdyn_project@odata.bind"]).toBe("/msdyn_projects(" + PROJECT + ")");
     // Lookup binds use the PascalCase schema nav-property names. The lowercase
     // logical names make Dataverse reject the payload as annotation-only.
     expect(dep["msdyn_PredecessorTask@odata.bind"]).toBe(
