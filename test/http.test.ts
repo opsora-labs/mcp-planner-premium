@@ -8,6 +8,7 @@ const ORG = "https://org12345.crm4.dynamics.com";
 function setEnv(extra: Record<string, string> = {}) {
   process.env.DATAVERSE_ORG_URL = ORG;
   process.env.LOG_LEVEL = "silent";
+  process.env.DATAVERSE_LINK_TYPE_STYLE = "global";
   delete process.env.TENANT_ID;
   delete process.env.AUTH_MODE;
   for (const [k, v] of Object.entries(extra)) process.env[k] = v;

@@ -1,16 +1,31 @@
 import { dvReq, dvHeaders, dvErrorMessage } from "../dataverse.js";
 
-/** Dependency link-type option values -> labels (Project for the web). */
+/**
+ * Dependency link-type option values -> short labels.
+ *
+ * Two value ranges exist across tenants:
+ *   Standard (global):  192350000=FS, 192350001=SS, 192350002=FF, 192350003=SF
+ *   EU/CRM4 (small-int): 0=FF, 1=FS, 2=SF, 3=SS
+ *
+ * Both are mapped here so read tools display correctly on either tenant.
+ * The write path (addTasksSimple.ts LINK_TYPE_VALUES) still sends the
+ * 192350000-range; whether PSS on EU tenants also accepts those is unconfirmed.
+ */
 export const LINK_TYPE_LABELS: Record<number, string> = {
   192350000: "FS",
   192350001: "SS",
   192350002: "FF",
   192350003: "SF",
+  // EU/CRM4 small-integer range (confirmed via describe_option_set on CRM4 env)
+  0: "FF",
+  1: "FS",
+  2: "SF",
+  3: "SS",
 };
 
 export function linkTypeLabel(v: unknown): string | undefined {
   if (typeof v !== "number") return undefined;
-  return LINK_TYPE_LABELS[v] || "Unknown(" + v + ")";
+  return LINK_TYPE_LABELS[v] ?? "Unknown(" + v + ")";
 }
 
 /** Current time as an ISO-8601 UTC string (Dataverse $filter has no now()). */

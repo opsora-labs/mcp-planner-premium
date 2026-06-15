@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { buildTaskEntities, type SimpleTask } from "../src/tools/addTasksSimple.js";
+import {
+  buildTaskEntities,
+  LINK_TYPE_VALUES_GLOBAL,
+  LINK_TYPE_VALUES_EU,
+  type SimpleTask,
+} from "../src/tools/addTasksSimple.js";
 import { validateAddEntities } from "../src/tools/addTasks.js";
 
 const PROJECT = "11111111-2222-3333-4444-555555555555";
@@ -118,12 +123,33 @@ describe("buildTaskEntities", () => {
     const dep = built.entities.find((e) => e["@odata.type"] === DEP)!;
     expect(dep.msdyn_projecttaskdependencylinktype).toBe(192350001); // SS
     expect(dep.msdyn_linklagduration).toBe(120);
-    expect(dep["msdyn_predecessortask@odata.bind"]).toBe(
+    // PSS requires the project bind on the dependency entity. On
+    // msdyn_projecttaskdependency, all lookup nav-properties use the PascalCase
+    // schema name — msdyn_Project (capital P), not msdyn_project (lowercase).
+    // Lowercase causes "undeclared property 'msdyn_project' which only has
+    // property annotations" (ODataException).
+    expect(dep["msdyn_Project@odata.bind"]).toBe("/msdyn_projects(" + PROJECT + ")");
+    expect("msdyn_project@odata.bind" in dep).toBe(false);
+    // Lookup binds use the PascalCase schema nav-property names. The lowercase
+    // logical names make Dataverse reject the payload as annotation-only.
+    expect(dep["msdyn_PredecessorTask@odata.bind"]).toBe(
       "/msdyn_projecttasks(" + built.refToId.a + ")",
     );
-    expect(dep["msdyn_successortask@odata.bind"]).toBe(
+    expect(dep["msdyn_SuccessorTask@odata.bind"]).toBe(
       "/msdyn_projecttasks(" + built.refToId.b + ")",
     );
+    // Regression guard for the annotation-only-property bug: the lowercase
+    // logical-name keys must NOT be present.
+    expect("msdyn_predecessortask@odata.bind" in dep).toBe(false);
+    expect("msdyn_successortask@odata.bind" in dep).toBe(false);
+    // Every `<x>@odata.bind` annotation on the dependency must carry a value
+    // (an annotation with no property value is exactly what Dataverse rejects).
+    for (const k of Object.keys(dep)) {
+      if (k.endsWith("@odata.bind")) {
+        expect(typeof dep[k]).toBe("string");
+        expect((dep[k] as string).length).toBeGreaterThan(0);
+      }
+    }
     // All task entities precede all dependency entities.
     const lastTask = Math.max(
       ...built.entities
@@ -144,6 +170,19 @@ describe("buildTaskEntities", () => {
     expect(built.entities[0].msdyn_ismilestone).toBeUndefined();
     expect(built.milestoneTaskIds).toEqual([built.refToId.m]);
     expect(() => validateAddEntities(built.entities)).not.toThrow();
+  });
+
+  it("uses EU link type values (0-3) when the EU map is passed", () => {
+    const tasks: SimpleTask[] = [
+      { ref: "a", subject: "A", bucket: BUCKET },
+      { ref: "b", subject: "B", bucket: BUCKET, dependsOn: [{ on: "a", type: "FS" }] },
+    ];
+    const builtGlobal = buildTaskEntities(PROJECT, tasks, resolve, LINK_TYPE_VALUES_GLOBAL);
+    const builtEu = buildTaskEntities(PROJECT, tasks, resolve, LINK_TYPE_VALUES_EU);
+    const depGlobal = builtGlobal.entities.find((e) => e["@odata.type"] === DEP)!;
+    const depEu = builtEu.entities.find((e) => e["@odata.type"] === DEP)!;
+    expect(depGlobal.msdyn_projecttaskdependencylinktype).toBe(192350000); // FS global
+    expect(depEu.msdyn_projecttaskdependencylinktype).toBe(1);             // FS eu
   });
 
   it("rejects duplicate refs and missing required fields", () => {

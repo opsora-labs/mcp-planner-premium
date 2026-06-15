@@ -131,7 +131,8 @@ sprints, custom fields).
 The server expands that into the full `msdyn_PssCreateV2` `EntityCollection`
 (`@odata.type`, `msdyn_project@odata.bind`, `msdyn_projectbucket@odata.bind`,
 client GUIDs, `msdyn_parenttask@odata.bind`, a `msdyn_projecttaskdependency`
-with `msdyn_projecttaskdependencylinktype: 192350000`, …) and returns
+with the correct `msdyn_projecttaskdependencylinktype` integer for your tenant,
+resolved from `DATAVERSE_LINK_TYPE_STYLE`, …) and returns
 `taskRefs` (`ref -> created taskId`) plus `milestoneTaskIds` for the follow-up
 milestone update. The mapping logic is the pure, unit-tested `buildTaskEntities`
 in `src/tools/addTasksSimple.ts`; the built collection is re-checked by the same
@@ -158,6 +159,7 @@ container loudly instead of failing per-request).
 | Env var | Required | Default | Example / notes |
 |---|---|---|---|
 | `DATAVERSE_ORG_URL` | yes | — | `https://contoso.crm.dynamics.com` |
+| `DATAVERSE_LINK_TYPE_STYLE` | yes | — | `global` for standard tenants (FS=192350000 …); `eu` for EU/CRM4 tenants (FS=1, SS=3, FF=0, SF=2). Run `describe_option_set` on `msdyn_projecttaskdependency` / `msdyn_projecttaskdependencylinktype` to find your value: if FinishToStart has value `1`, use `eu`; if it has value `192350000`, use `global`. The server will not start without this set. |
 | `TENANT_ID` | yes when `AUTH_MODE=validate` | — | Entra tenant GUID, e.g. `00000000-0000-0000-0000-000000000000` |
 | `AUTH_MODE` | no | `validate` | `validate` = verify inbound JWT; `insecure-passthrough` = skip (LOCAL DEV ONLY) |
 | `ENTRA_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration your MCP host uses for OAuth — the same value you enter in the host's "Client ID" field. When set, the server rejects any token not issued to this app. |
@@ -183,6 +185,7 @@ npm install
 npm run build
 # Local dev: skip token validation. PORT defaults to 3000.
 DATAVERSE_ORG_URL=https://contoso.crm.dynamics.com \
+  DATAVERSE_LINK_TYPE_STYLE=global \
   AUTH_MODE=insecure-passthrough \
   npm start
 # health check
@@ -211,6 +214,7 @@ az containerapp create \
   --min-replicas 0 --max-replicas 3 \
   --env-vars \
     DATAVERSE_ORG_URL=https://contoso.crm.dynamics.com \
+    DATAVERSE_LINK_TYPE_STYLE=global \
     TENANT_ID=00000000-0000-0000-0000-000000000000 \
     ENTRA_CLIENT_ID=11111111-1111-1111-1111-111111111111
 

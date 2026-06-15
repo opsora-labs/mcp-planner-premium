@@ -21,6 +21,13 @@ Ask the user:
 Keep a running tally in memory: `PASS`, `FAIL`, `SKIP` counts. Do **not** stop on first failure —
 continue all phases and report everything at the end.
 
+> **Mind the tool-call budget.** A full Write-mode run (Phases 0-3) makes ~50+ tool
+> calls and can hit a session's tool-call limit before Phase 3. If you are running
+> Write mode and notice you are deep into Phase 2, **prefer running Phase 3 as its own
+> session** (it needs no real data — see the note at the top of Phase 3). When you split,
+> say so in the report so the missed steps read as `SKIP (run separately)`, not silent
+> gaps.
+
 The environment is determined by the MCP server's connection — do **not** ask the user for it.
 Populate the `**Environment:**` field in the report from the `whoami` response (Step 0.2) if it
 includes an org/tenant identifier, otherwise write "derived from MCP server connection".
@@ -179,7 +186,18 @@ Call: `describe_option_set` with:
 **Pass criteria:**
 - `ok` is `true`
 - `options` is an array with at least 4 entries
-- The option with `value: 192350000` exists (this is the Finish-to-Start link type)
+- A Finish-to-Start option exists (label like `"Finish to Start"` / `"FinishToStart"`).
+  **Record its `value`.**
+
+> **The FS numeric value is environment-dependent — do not hard-fail on a specific
+> number.** Most tenants use `192350000` for Finish-to-Start, but some (observed on a
+> CRM4/EU environment) expose the link types as small integers `0-3`. This tool faithfully
+> echoes the tenant's metadata, so either is correct *for that tenant*. Record the FS value
+> you actually got and flag a NOTE (not a FAIL) if it is **not** `192350000`, because the
+> server's hard-coded link-type constants (`LINK_TYPE_VALUES` / `LINK_TYPE_LABELS`,
+> `192350000`-style) would then be wrong for that environment and dependencies could be
+> created with the wrong link type. Only record FAIL if no Finish-to-Start option appears
+> at all.
 
 ---
 
@@ -276,18 +294,35 @@ session from Step 2.3 disappears from the list.
 - Eventually `openSets` length = 0 (or the specific session is gone)
 - If still open after 10 polls: record as FAIL with "operation did not complete in time"
 
+> **Persistence lag is normal.** The OperationSet often disappears from `openSets`
+> *before* the tasks are queryable — observed gaps of ~15-20s between `apply_changes`
+> returning `ok: true` and `get_plan_tasks_and_buckets` showing the new rows. An empty
+> `openSets` means "the write was accepted", **not** "the data is readable yet". Do not
+> treat a `taskCount: 0` immediately after apply as a failure; let Step 2.7 retry.
+
 ### Step 2.7 — verify via get_plan_tasks_and_buckets
 
-Call: `get_plan_tasks_and_buckets` with `{ "projectId": "<NEW_PROJECT_ID>" }`
+After `openSets` is empty, wait ~5 seconds, then call `get_plan_tasks_and_buckets` with
+`{ "projectId": "<NEW_PROJECT_ID>" }`. **Retry the verify** up to 6 times with ~5 seconds
+between attempts until `taskCount` reaches 7 (to absorb the persistence lag noted above).
 
 **Pass criteria:**
-- `taskCount` = 7 (the 7 tasks created in Step 2.4)
+- `taskCount` = 7 (the 7 tasks created in Step 2.4) — reached within the retry budget
 - All 7 task IDs from Step 2.4 appear in the returned `tasks` array
 - `summaryTaskIds` contains at least `L1` (root has children so it is a summary task)
+- Only record FAIL if `taskCount` is still < 7 after all 6 retries (note how many tasks
+  did appear and after how long).
 
 Save the returned `summaryTaskIds` array as `SUMMARY_IDS`.
 
-### Step 2.8 — update_tasks (rename L6 + set milestone)
+### Step 2.8 — update_tasks (rename L6 + progress; milestone is ignored by design)
+
+> **Milestone cannot be set through the API.** Planner Premium's scheduling engine
+> rejects `msdyn_ismilestone` on update with `ScheduleAPI-AV-0002` (it also rejects it
+> on create and auto-sets it on summary tasks). The server therefore **drops** the
+> `milestone` field and returns a warning rather than failing the batch. This step
+> sends `milestone: true` on purpose to confirm that graceful-ignore behaviour — the
+> rename and progress still apply.
 
 Open a second change session first:
 
@@ -312,6 +347,10 @@ Call: `update_tasks` with:
 
 **Pass criteria:**
 - `ok` is `true`
+- `warnings` is a non-empty array containing a message that `milestone` was ignored
+  (e.g. "'milestone' was ignored … set it … in the Planner UI")
+- **FAIL** if the call errors out, or if `warnings` is empty/absent (the milestone
+  field must be dropped with a warning, never silently accepted or sent to PSS)
 
 ### Step 2.9 — apply update session
 
@@ -325,9 +364,12 @@ Call: `apply_changes` with `{ "operationSetId": "<OP_SET_2>" }`
 Call: `get_task` with `{ "taskId": "<LEAF_TASK_ID>" }`
 
 **Pass criteria:**
-- `task.isMilestone` is `true`
-- `task.subject` is `"Level 6 (verified)"`
-- `task.progressPercent` is 50
+- `task.subject` is `"Level 6 (verified)"` — the rename was applied
+- `task.progressPercent` is 50 — the progress update was applied
+- `task.isMilestone` is `false` — L6 is a leaf and milestone was (correctly) NOT set
+  via the API. (Treat `true` here as a FAIL: it would mean the milestone field leaked
+  through despite the Step 2.8 contract. A summary/parent task could legitimately show
+  `true` because PSS auto-flags those, but L6 is a leaf.)
 
 ### Step 2.11 — cleanup (delete test tasks)
 
@@ -357,6 +399,13 @@ Call: `apply_changes` with `{ "operationSetId": "<OP_SET_CLEAN>" }`
 
 These tests send deliberately invalid payloads. **A test passes when the server returns an error
 (not a success).** If the tool returns `ok: true` or a success result, that is a FAIL.
+
+> **Phase 3 is self-contained — run it standalone if you are low on tool-call budget.**
+> Every guardrail below uses the placeholder GUIDs and needs no plan, no write session,
+> and no Phase 0-2 state. If a full Write-mode run is about to exhaust its budget, start
+> a fresh session and run **only** Phase 3 (G1-G13), then merge the guardrail results into
+> the report. The last run hit the tool-call limit mid-Phase-2 and never reached these —
+> splitting avoids that.
 
 ### Two tools, two input formats — why the guardrail payloads differ
 
@@ -396,7 +445,7 @@ FAKE_K = "dddddddd-eeee-ffff-aaaa-bbbbbbbbbbbb"
 | G4 | `add_tasks_batch` | Task with `msdyn_ismilestone: true` in entities (blocked-on-create field) | `not allowed on pss create` |
 | G5 | `add_tasks_batch` | Task using `"msdyn_bucket@odata.bind"` instead of `"msdyn_projectbucket@odata.bind"` | `valid navigation property` |
 | G6 | `add_tasks_batch` | Two tasks where child appears before parent in the array | `parents must appear before` |
-| G7 | `add_tasks_batch` | 201 task entities (over the 200-entity cap) | `max 200` |
+| G7 | `add_tasks_batch` | 201 task entities (over the 200-entity cap) | `max 200` *(optional — skip if token budget is tight; the cap is enforced in code before any network call)* |
 | G8 | `delete_tasks_batch` | `{ "operationSetId": "FAKE_A", "taskIds": ["FAKE_B"], "confirmed": false }` | `confirmed` |
 | G9 | `delete_tasks_batch` | `{ "operationSetId": "FAKE_A", "records": "[{\"entityLogicalName\":\"msdyn_project\",\"recordId\":\"FAKE_B\"}]", "confirmed": true }` | `blocked by policy` |
 | G10 | `update_tasks_batch` | `{ "operationSetId": "FAKE_A", "entities": "[{\"@odata.type\":\"Microsoft.Dynamics.CRM.msdyn_projecttaskdependency\"}]" }` | `cannot be updated` |
@@ -518,7 +567,7 @@ everything.
 | 1.7 | get_bucket_breakdown | `get_bucket_breakdown` | [✅/❌/⏭️] | method=[aggregate\|client] |
 | 1.8 | list_dependencies | `list_dependencies` | [✅/❌/⏭️] | [N] dependencies |
 | 1.9 | list_team_members | `list_team_members` | [✅/❌/⏭️] | [N] members |
-| 1.10 | describe_option_set (link types) | `describe_option_set` | [✅/❌/⏭️] | [N] options, FS=192350000 present |
+| 1.10 | describe_option_set (link types) | `describe_option_set` | [✅/❌/⏭️] | [N] options, FS value=[N] (NOTE if ≠192350000) |
 
 ---
 
@@ -535,9 +584,9 @@ everything.
 | 2.5 | apply_changes | `apply_changes` | [✅/❌] | — |
 | 2.6 | poll for completion | `check_change_session_status` | [✅/❌] | [N] polls needed |
 | 2.7 | verify task count | `get_plan_tasks_and_buckets` | [✅/❌] | taskCount=[N] (expected 7) |
-| 2.8 | update_tasks (milestone) | `update_tasks` | [✅/❌] | L6 → milestone=true, 50% |
+| 2.8 | update_tasks (rename+progress; milestone ignored) | `update_tasks` | [✅/❌] | L6 → "verified", 50%; milestone warning present=[bool] |
 | 2.9 | apply update session | `apply_changes` | [✅/❌] | — |
-| 2.10 | verify update | `get_task` | [✅/❌] | isMilestone=[bool], subject=[value] |
+| 2.10 | verify update | `get_task` | [✅/❌] | subject=[value], progress=50, isMilestone=false (leaf) |
 | 2.11 | cleanup (delete tasks) | `delete_tasks_batch` | [✅/❌] | [N] tasks deleted |
 
 **Residue:** Test plan `ZZ-MCP-TEST-<date>` (id: [projectId]) remains in Planner — remove manually.
@@ -554,7 +603,7 @@ everything.
 | G4 | Blocked-on-create field | `add_tasks_batch` | [✅/❌] | [error] |
 | G5 | Wrong bind alias | `add_tasks_batch` | [✅/❌] | [error] |
 | G6 | Child before parent | `add_tasks_batch` | [✅/❌] | [error] |
-| G7 | >200 entities | `add_tasks_batch` | [✅/❌] | [error] |
+| G7 | >200 entities | `add_tasks_batch` | [✅/❌/⏭️ SKIP-optional] | [error or "skipped — token cost"] |
 | G8 | Delete without confirmed=true | `delete_tasks_batch` | [✅/❌] | [error] |
 | G9 | Whole-plan delete blocked | `delete_tasks_batch` | [✅/❌] | [error] |
 | G10 | Dependency update rejected | `update_tasks_batch` | [✅/❌] | [error] |

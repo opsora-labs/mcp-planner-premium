@@ -4,3 +4,6 @@ dist/
 .env
 .env.*
 .DS_Store
+
+# Claude Code: personal, per-user overrides (shared config lives in .claude/settings.json)
+.claude/settings.local.json

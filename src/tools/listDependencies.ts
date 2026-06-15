@@ -34,6 +34,17 @@ export const listDependencies: ToolDef = {
       },
       { retry: true },
     );
+    // Some environments do not expose the msdyn_projecttaskdependency entity set
+    // (the segment 404s). Degrade gracefully - the same pattern get_task uses -
+    // rather than failing the whole call.
+    if (depRes.status === 404)
+      return {
+        ok: true,
+        projectId,
+        count: 0,
+        dependencies: [],
+        warnings: ["Dependency links unavailable on this environment."],
+      };
     if (depRes.status >= 400)
       throw new Error(
         "list_dependencies failed (" + depRes.status + "): " + dvErrorMessage(depRes),

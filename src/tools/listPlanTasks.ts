@@ -6,7 +6,11 @@ import type { ToolDef } from "./types.js";
 
 interface FullTask extends RawTask {
   msdyn_start?: string | null;
+  msdyn_description?: string | null;
+  msdyn_outlinelevel?: number | null;
   msdyn_displaysequence?: number | null;
+  msdyn_priority?: number | null;
+  msdyn_effort?: number | null;
   _msdyn_projectbucket_value?: string | null;
 }
 
@@ -44,8 +48,9 @@ export const listPlanTasks: ToolDef = {
 
     const url =
       BASE +
-      "/msdyn_projecttasks?$select=msdyn_projecttaskid,msdyn_subject,msdyn_start,msdyn_finish," +
-      "msdyn_progress,msdyn_ismilestone,msdyn_displaysequence,_msdyn_projectbucket_value," +
+      "/msdyn_projecttasks?$select=msdyn_projecttaskid,msdyn_subject,msdyn_description," +
+      "msdyn_start,msdyn_finish,msdyn_progress,msdyn_effort,msdyn_outlinelevel," +
+      "msdyn_ismilestone,msdyn_priority,msdyn_displaysequence,_msdyn_projectbucket_value," +
       "_msdyn_parenttask_value&$filter=" +
       odata +
       "&$orderby=msdyn_displaysequence asc";
@@ -77,10 +82,14 @@ export const listPlanTasks: ToolDef = {
     const tasks = filtered.map((t) => ({
       taskId: t.msdyn_projecttaskid,
       subject: t.msdyn_subject,
+      description: t.msdyn_description ?? null,
       start: t.msdyn_start ?? null,
       finish: t.msdyn_finish ?? null,
       progressPercent:
         typeof t.msdyn_progress === "number" ? Math.round(t.msdyn_progress * 100) : null,
+      effortHours: t.msdyn_effort ?? null,
+      outlineLevel: t.msdyn_outlinelevel ?? null,
+      priority: t.msdyn_priority ?? null,
       isMilestone: t.msdyn_ismilestone === true,
       isSummary: summaryIds.has(String(t.msdyn_projecttaskid).toLowerCase()),
       bucketId: t._msdyn_projectbucket_value ?? null,

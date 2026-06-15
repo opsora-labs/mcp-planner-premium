@@ -4,9 +4,22 @@ import { summariseTasks, linkTypeLabel, type RawTask } from "../src/tools/readHe
 const NOW = "2026-06-15T00:00:00Z";
 
 describe("linkTypeLabel", () => {
-  it("maps option values to FS/SS/FF/SF", () => {
+  it("maps standard 192350000-range values to FS/SS/FF/SF", () => {
     expect(linkTypeLabel(192350000)).toBe("FS");
+    expect(linkTypeLabel(192350001)).toBe("SS");
+    expect(linkTypeLabel(192350002)).toBe("FF");
     expect(linkTypeLabel(192350003)).toBe("SF");
+  });
+
+  it("maps EU/CRM4 small-integer values (0-3) to FF/FS/SF/SS", () => {
+    // EU tenants expose 0=FF, 1=FS, 2=SF, 3=SS (confirmed via describe_option_set).
+    expect(linkTypeLabel(0)).toBe("FF");
+    expect(linkTypeLabel(1)).toBe("FS");
+    expect(linkTypeLabel(2)).toBe("SF");
+    expect(linkTypeLabel(3)).toBe("SS");
+  });
+
+  it("returns Unknown(N) for unrecognised values and undefined for non-numbers", () => {
     expect(linkTypeLabel(999)).toBe("Unknown(999)");
     expect(linkTypeLabel(undefined)).toBeUndefined();
   });

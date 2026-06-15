@@ -52,16 +52,21 @@ export const getPlanSummary: ToolDef = {
       );
     const p = planRes.json || {};
 
-    // Summary-aware task counts (one paginated scan).
+    // Summary-aware task counts (one paginated scan). msdyn_outlinelevel is included
+    // so we can surface the plan's current max nesting depth alongside the counts.
     const tasksUrl =
       BASE +
       "/msdyn_projecttasks?$select=msdyn_projecttaskid,msdyn_ismilestone,msdyn_finish," +
-      "msdyn_progress,_msdyn_parenttask_value&$filter=_msdyn_project_value eq " +
+      "msdyn_progress,_msdyn_parenttask_value,msdyn_outlinelevel&$filter=_msdyn_project_value eq " +
       projectId;
     const paged = await pageAll(tasksUrl, readHeaders());
     if (paged.truncated)
       warnings.push("Task scan hit the page cap - counts are a lower bound.");
     const rollup = summariseTasks(paged.rows as RawTask[], nowIso());
+    const currentMaxOutlineLevel = paged.rows.reduce(
+      (max: number, r: any) => Math.max(max, typeof r.msdyn_outlinelevel === "number" ? r.msdyn_outlinelevel : 0),
+      0,
+    );
 
     return {
       ok: true,
@@ -80,6 +85,11 @@ export const getPlanSummary: ToolDef = {
       summaryTaskCount: rollup.summaryTaskCount,
       milestoneCount: rollup.milestoneCount,
       overdueLeafTaskCount: rollup.overdueLeafTaskCount,
+      planLimits: {
+        currentMaxOutlineLevel,
+        totalTasks: rollup.totalTasks,
+        note: "PSS enforces a plan-wide task nesting limit (exact value unconfirmed, ~10). If apply_changes fails with TASK_LEVEL_LIMIT_EXCEEDED, reduce hierarchy depth or create a new plan.",
+      },
       modifiedOn: p.modifiedon,
       truncated: paged.truncated,
       warnings,

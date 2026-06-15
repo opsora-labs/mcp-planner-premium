@@ -124,6 +124,14 @@ export function validateUpdateEntities(
     if (t.endsWith("msdyn_projecttask")) {
       if (!ent.msdyn_projecttaskid)
         throw new Error("entities[" + i + "] (task): msdyn_projecttaskid required.");
+      // PSS rejects null date values with "Null object cannot be converted to a value type."
+      for (const dateField of ["msdyn_start", "msdyn_finish"]) {
+        if (Object.prototype.hasOwnProperty.call(ent, dateField) && ent[dateField] === null) {
+          throw new Error(
+            "entities[" + i + "] (task): " + dateField + " must not be null — PSS rejects null dates. Omit the field to leave it unchanged.",
+          );
+        }
+      }
       // Reject rolled-up field writes on summary (parent) tasks.
       if (summarySet[String(ent.msdyn_projecttaskid).toLowerCase()]) {
         const offending = ROLLED_UP_FIELDS.filter((f) =>

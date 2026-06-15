@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
-import { dvReq, dvHeaders, dvErrorMessage, asArray } from "../dataverse.js";
+import { dvReq, dvHeaders, dvErrorMessage, asArray, assertGuid } from "../dataverse.js";
 import { validateUpdateEntities } from "./updateTasks.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
+const isGuid = (s: string): boolean => GUID_RE.test(s);
 
 export interface SimpleTaskUpdate {
   taskId: string;
@@ -16,6 +17,14 @@ export interface SimpleTaskUpdate {
   progressPercent?: number; // 0-100, converted to msdyn_progress 0-1
   milestone?: boolean;
   priority?: number;
+  /** Bucket name (resolved against the plan) or a bucketId GUID. Requires projectId. */
+  bucket?: string;
+}
+
+export interface BuiltUpdate {
+  entities: any[];
+  /** User-visible notes about fields that were dropped (e.g. milestone). */
+  warnings: string[];
 }
 
 /**
@@ -24,12 +33,22 @@ export interface SimpleTaskUpdate {
  * `msdyn_progress` (0-1). Pure and unit-testable. Summary-task rolled-up-field
  * protection is enforced separately by validateUpdateEntities (which the handler
  * runs on the result).
+ *
+ * `milestone` is intentionally NEVER emitted: PSS rejects msdyn_ismilestone on
+ * update (ScheduleAPI-AV-0002) just as it does on create - the scheduling engine
+ * manages that flag itself (it even auto-sets it on summary tasks). When a caller
+ * passes `milestone`, it is dropped and a warning is returned instead of failing
+ * the whole batch.
  */
-export function buildUpdateEntities(tasks: SimpleTaskUpdate[]): any[] {
+export function buildUpdateEntities(
+  tasks: SimpleTaskUpdate[],
+  resolvedBucketIds?: Map<number, string>,
+): BuiltUpdate {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
 
-  return tasks.map((t, i) => {
+  const warnings: string[] = [];
+  const entities = tasks.map((t, i) => {
     const id = (t.taskId || "").trim();
     if (!id) throw new Error("tasks[" + i + "]: taskId is required.");
     if (!GUID_RE.test(id))
@@ -48,13 +67,17 @@ export function buildUpdateEntities(tasks: SimpleTaskUpdate[]): any[] {
       ent.msdyn_description = t.description;
       changed++;
     }
-    if (t.start !== undefined) {
+    if (t.start !== undefined && t.start !== null) {
       ent.msdyn_start = t.start;
       changed++;
+    } else if (t.start === null) {
+      warnings.push("tasks[" + i + "] (" + id + "): start=null skipped — PSS rejects null dates (returns 'Null object cannot be converted to a value type'). Omit the field instead.");
     }
-    if (t.finish !== undefined) {
+    if (t.finish !== undefined && t.finish !== null) {
       ent.msdyn_finish = t.finish;
       changed++;
+    } else if (t.finish === null) {
+      warnings.push("tasks[" + i + "] (" + id + "): finish=null skipped — PSS rejects null dates (returns 'Null object cannot be converted to a value type'). Omit the field instead.");
     }
     if (t.effortHours !== undefined) {
       ent.msdyn_effort = t.effortHours;
@@ -69,19 +92,45 @@ export function buildUpdateEntities(tasks: SimpleTaskUpdate[]): any[] {
       changed++;
     }
     if (t.milestone !== undefined) {
-      ent.msdyn_ismilestone = t.milestone;
-      changed++;
+      // Dropped on purpose - see the function doc. Never put msdyn_ismilestone
+      // in a PSS update payload.
+      warnings.push(
+        "tasks[" +
+          i +
+          "] (" +
+          id +
+          "): 'milestone' was ignored - Planner Premium's scheduling engine does " +
+          "not allow setting msdyn_ismilestone via the API (it manages the flag " +
+          "itself). Set the milestone manually in the Planner UI if you need it.",
+      );
     }
     if (t.priority !== undefined) {
       ent.msdyn_priority = t.priority;
       changed++;
     }
+    if (t.bucket !== undefined) {
+      const bucketId = resolvedBucketIds?.get(i);
+      if (!bucketId)
+        throw new Error(
+          "tasks[" + i + "]: bucket '" + t.bucket + "' could not be resolved — pass projectId to enable bucket-name resolution, or use a bucketId GUID directly.",
+        );
+      ent["msdyn_projectbucket@odata.bind"] = "/msdyn_projectbuckets(" + bucketId + ")";
+      changed++;
+    }
     if (changed === 0)
       throw new Error(
-        "tasks[" + i + "]: nothing to change - provide at least one field besides taskId.",
+        "tasks[" +
+          i +
+          "]: nothing to change - provide at least one field besides taskId" +
+          (t.milestone !== undefined
+            ? " (milestone cannot be changed via the API - set it in the Planner UI)"
+            : "") +
+          ".",
       );
     return ent;
   });
+
+  return { entities, warnings };
 }
 
 const updateSchema = z.object({
@@ -95,8 +144,19 @@ const updateSchema = z.object({
     .number()
     .optional()
     .describe("Percent complete, 0-100 (server converts to the 0-1 the API expects)."),
-  milestone: z.boolean().optional().describe("Set/clear the milestone flag."),
+  milestone: z
+    .boolean()
+    .optional()
+    .describe(
+      "IGNORED - milestone cannot be set via the API (PSS rejects msdyn_ismilestone on update and the engine manages it). Passing it returns a warning; set milestones in the Planner UI.",
+    ),
   priority: z.number().optional().describe("Priority (integer option-set value)."),
+  bucket: z
+    .string()
+    .optional()
+    .describe(
+      "Move task to a different bucket: bucket NAME (resolved against the plan) or a bucketId GUID. Requires projectId at the top level.",
+    ),
 });
 
 // Ergonomic update - the model sends a plain list keyed by taskId; the server
@@ -105,7 +165,7 @@ export const updateTasksSimple: ToolDef = {
   name: "update_tasks",
   title: "Update Tasks in Plan",
   description:
-    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, milestone, priority); the server builds the Dataverse payload. Requires an open change session. NEVER change start/finish/effort/progress on summary (parent) tasks - fetch get_plan_tasks_and_buckets first and pass its summaryTaskIds so such writes are rejected (renames/descriptions on summary tasks are fine). Dependencies cannot be updated (delete and recreate). This IS where you set/clear the milestone flag (milestone is blocked on create but allowed on update - add_tasks returns milestoneTaskIds for exactly this follow-up). Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
+    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket); the server builds the Dataverse payload. Pass projectId to enable two automatic behaviours: (1) bucket names are resolved to IDs, and (2) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
   inputSchema: {
     operationSetId: z
       .string()
@@ -113,15 +173,22 @@ export const updateTasksSimple: ToolDef = {
     tasks: z
       .union([z.string(), z.array(updateSchema)])
       .describe("The task updates. A JSON array (or JSON string) of update objects."),
+    projectId: z
+      .string()
+      .optional()
+      .describe(
+        "GUID of the plan. When provided, the server auto-fetches the task hierarchy and automatically protects summary (parent) tasks from invalid schedule-field writes — no separate get_plan_tasks_and_buckets call needed. Also required when any task update includes a 'bucket' name. Strongly recommended whenever updating start/finish/effort/progress.",
+      ),
     summaryTaskIds: z
       .union([z.string(), z.array(z.string())])
       .optional()
       .describe(
-        "Optional JSON array of summary-task GUIDs from get_plan_tasks_and_buckets. If provided, rolled-up-field writes (start/finish/effort/progress/duration) on those tasks are rejected.",
+        "Optional JSON array of summary-task GUIDs from get_plan_tasks_and_buckets. Merged with auto-detected summary tasks when projectId is provided. If both are omitted, the summary-task guard does not fire.",
       ),
   },
   handler: async (input: {
     operationSetId: string;
+    projectId?: unknown;
     tasks: unknown;
     summaryTaskIds?: unknown;
   }) => {
@@ -131,10 +198,97 @@ export const updateTasksSimple: ToolDef = {
     if (!operationSetId) throw new Error("operationSetId is required.");
 
     const tasks = asArray<SimpleTaskUpdate>(input.tasks, "tasks");
-    const entities = buildUpdateEntities(tasks);
+
+    // Resolve bucket names -> GUIDs for tasks that request a bucket move.
+    const resolvedBucketIds = new Map<number, string>();
+    const wantedNames = new Set<string>();
+    for (const t of tasks) {
+      const b = (t.bucket || "").trim();
+      if (b && !isGuid(b)) wantedNames.add(b.toLowerCase());
+    }
+    if (wantedNames.size > 0) {
+      const projectId = assertGuid(String(input.projectId || ""), "projectId");
+      const res = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projectbuckets?$select=msdyn_projectbucketid,msdyn_name&$filter=_msdyn_project_value eq " +
+            projectId +
+            "&$top=200",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (res.status >= 400)
+        throw new Error("bucket lookup failed (" + res.status + "): " + dvErrorMessage(res));
+      const nameToId: Record<string, string> = {};
+      const counts: Record<string, number> = {};
+      for (const b of res.json?.value || []) {
+        const key = String(b.msdyn_name || "").trim().toLowerCase();
+        counts[key] = (counts[key] || 0) + 1;
+        nameToId[key] = b.msdyn_projectbucketid;
+      }
+      for (const name of wantedNames) {
+        if (!nameToId[name])
+          throw new Error(
+            "No bucket named '" + name + "' in this plan. Create it first with add_bucket, or pass a bucketId GUID.",
+          );
+        if (counts[name] > 1)
+          throw new Error(
+            "Multiple buckets named '" + name + "' — pass the bucketId GUID instead of the name.",
+          );
+      }
+      tasks.forEach((t, i) => {
+        const b = (t.bucket || "").trim();
+        if (!b) return;
+        resolvedBucketIds.set(i, isGuid(b) ? b : nameToId[b.toLowerCase()]);
+      });
+    } else {
+      // Handle tasks that pass a bucketId GUID directly (no name lookup needed).
+      tasks.forEach((t, i) => {
+        const b = (t.bucket || "").trim();
+        if (b && isGuid(b)) resolvedBucketIds.set(i, b);
+      });
+    }
+
+    const { entities, warnings } = buildUpdateEntities(tasks, resolvedBucketIds);
+
+    // Auto-detect summary tasks from the plan hierarchy when projectId is provided.
+    // This lets the guard fire without requiring a prior get_plan_tasks_and_buckets
+    // call — the same projectId used for bucket resolution doubles here.
+    let effectiveSummaryIds: unknown = input.summaryTaskIds;
+    if (input.projectId) {
+      const projId = assertGuid(String(input.projectId), "projectId");
+      const hierRes = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projecttasks?$select=msdyn_projecttaskid,_msdyn_parenttask_value" +
+            "&$filter=_msdyn_project_value eq " +
+            projId +
+            "&$top=1500",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (hierRes.status < 400) {
+        const autoIds = new Set<string>();
+        for (const t of hierRes.json?.value ?? []) {
+          const p = t._msdyn_parenttask_value;
+          if (p) autoIds.add(String(p).toLowerCase());
+        }
+        // Merge auto-detected with any explicitly provided ids.
+        const explicit = asArray<string>(input.summaryTaskIds ?? [], "summaryTaskIds");
+        for (const id of explicit) autoIds.add(id.toLowerCase());
+        effectiveSummaryIds = [...autoIds];
+      }
+      // If the hierarchy fetch fails, fall back to whatever the caller provided.
+    }
 
     // Defense in depth + summary-task protection (same checks as the raw tool).
-    validateUpdateEntities(entities, input.summaryTaskIds);
+    validateUpdateEntities(entities, effectiveSummaryIds);
 
     const response = await dvReq({
       url: BASE + "/msdyn_PssUpdateV2",
@@ -153,6 +307,7 @@ export const updateTasksSimple: ToolDef = {
     return {
       ok: true,
       queued: entities.length,
+      warnings,
       response: body,
       note: "Queued. Saved only after 'Apply Changes to Plan'.",
     };

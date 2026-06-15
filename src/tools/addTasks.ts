@@ -41,15 +41,27 @@ const BIND_ALIASES: Record<string, string> = {
   "msdyn_projectid@odata.bind": "msdyn_project@odata.bind",
   "msdyn_parent@odata.bind": "msdyn_parenttask@odata.bind",
   "msdyn_parenttaskid@odata.bind": "msdyn_parenttask@odata.bind",
+  // Dependency lookups bind on the PascalCase schema names. The lowercase
+  // logical names make Dataverse reject the payload as an annotation-only
+  // property with no value; teach the correct key instead.
+  "msdyn_predecessortask@odata.bind": "msdyn_PredecessorTask@odata.bind",
+  "msdyn_successortask@odata.bind": "msdyn_SuccessorTask@odata.bind",
 };
 
 // Dependency link types - option-set values of msdyn_projecttaskdependencylinktype.
 // FS is the default when the field is omitted.
+// Two value ranges exist: 192350000-style (global tenants) and 0-3 (EU/CRM4 tenants).
+// Both are accepted here so raw callers on either tenant can send valid payloads.
 const LINK_TYPES: Record<number, string> = {
   192350000: "FS", // Finish-to-Start (default)
   192350001: "SS", // Start-to-Start
   192350002: "FF", // Finish-to-Finish
   192350003: "SF", // Start-to-Finish
+  // EU/CRM4 small-integer range (confirmed via describe_option_set on CRM4 env)
+  0: "FF",
+  1: "FS",
+  2: "SF",
+  3: "SS",
 };
 
 /**
@@ -194,14 +206,25 @@ export function validateAddEntities(entities: any[]): void {
       }
     }
     if (t === "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency") {
+      // On dependency entities ALL lookup nav-properties use PascalCase schema names.
+      // Teach the correct casing for the project bind (different from task entities
+      // where msdyn_project@odata.bind, lowercase, is correct).
+      if (Object.prototype.hasOwnProperty.call(ent, "msdyn_project@odata.bind")) {
+        throw new Error(
+          "entities[" +
+            i +
+            "] (dependency): 'msdyn_project@odata.bind' is not a valid navigation property on msdyn_projecttaskdependency." +
+            " Use 'msdyn_Project@odata.bind' (capital P) — all lookup binds on dependency entities use PascalCase schema names.",
+        );
+      }
       if (
-        !ent["msdyn_predecessortask@odata.bind"] ||
-        !ent["msdyn_successortask@odata.bind"]
+        !ent["msdyn_PredecessorTask@odata.bind"] ||
+        !ent["msdyn_SuccessorTask@odata.bind"]
       ) {
         throw new Error(
           "entities[" +
             i +
-            "] (dependency): msdyn_predecessortask@odata.bind and msdyn_successortask@odata.bind are required.",
+            "] (dependency): msdyn_PredecessorTask@odata.bind and msdyn_SuccessorTask@odata.bind are required (PascalCase nav-property names).",
         );
       }
       // Optional link type: if present it must be one of the FS/SS/FF/SF option values.

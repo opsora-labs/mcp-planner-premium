@@ -41,6 +41,12 @@ const EnvSchema = z
     ALLOWED_HOSTS: z.string().optional(),
     ALLOWED_ORIGINS: z.string().optional(),
 
+    // Link-type option-set value range used by this Dataverse tenant.
+    //   global  — standard tenants: FS=192350000, SS=192350001, FF=192350002, SF=192350003
+    //   eu      — EU/CRM4 tenants:  FS=1, SS=3, FF=0, SF=2
+    // Check with: describe_option_set on msdyn_projecttaskdependency/msdyn_projecttaskdependencylinktype
+    DATAVERSE_LINK_TYPE_STYLE: z.enum(["global", "eu"]),
+
     // Outbound Dataverse call timeout, and inbound rate limit.
     REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
     RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(120),

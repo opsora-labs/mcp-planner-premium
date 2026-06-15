@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { validateAddEntities } from "../src/tools/addTasks.js";
 import { validateUpdateEntities } from "../src/tools/updateTasks.js";
 import { validateDeleteRecords } from "../src/tools/deleteTasks.js";
+import { parsePssError, dvPssErrorMessage } from "../src/dataverse.js";
 
 const TASK = "Microsoft.Dynamics.CRM.msdyn_projecttask";
 const DEP = "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency";
@@ -101,8 +102,35 @@ describe("validateAddEntities", () => {
 
   it("rejects a dependency missing predecessor/successor", () => {
     expect(() => validateAddEntities([{ "@odata.type": DEP }])).toThrow(
-      /predecessortask@odata.bind and msdyn_successortask@odata.bind are required/,
+      /PredecessorTask@odata.bind and msdyn_SuccessorTask@odata.bind are required/,
     );
+  });
+
+  it("teaches the PascalCase nav-property for lowercase dependency task binds", () => {
+    expect(() =>
+      validateAddEntities([
+        {
+          "@odata.type": DEP,
+          "msdyn_predecessortask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+          "msdyn_successortask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+        },
+      ]),
+    ).toThrow(/is not a valid navigation property. Use 'msdyn_PredecessorTask@odata.bind'/);
+  });
+
+  it("teaches msdyn_Project (capital P) for lowercase project bind on dependency", () => {
+    // msdyn_project@odata.bind (lowercase) is correct on msdyn_projecttask but
+    // is undeclared on msdyn_projecttaskdependency — it must be msdyn_Project.
+    expect(() =>
+      validateAddEntities([
+        {
+          "@odata.type": DEP,
+          "msdyn_project@odata.bind": "/msdyn_projects(" + guid(3) + ")",
+          "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+          "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+        },
+      ]),
+    ).toThrow(/msdyn_Project@odata.bind.*capital P/);
   });
 
   it("rejects an invalid dependency link type", () => {
@@ -110,12 +138,29 @@ describe("validateAddEntities", () => {
       validateAddEntities([
         {
           "@odata.type": DEP,
-          "msdyn_predecessortask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
-          "msdyn_successortask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+          "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+          "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
           msdyn_projecttaskdependencylinktype: 999,
         },
       ]),
     ).toThrow(/is invalid. Allowed option values/);
+  });
+
+  it("accepts EU/CRM4 small-integer link type values (0-3)", () => {
+    // EU tenants expose link types as 0=FF, 1=FS, 2=SF, 3=SS in metadata.
+    // The guardrail must not reject them when a raw caller sends them.
+    for (const v of [0, 1, 2, 3]) {
+      expect(() =>
+        validateAddEntities([
+          {
+            "@odata.type": DEP,
+            "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+            "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+            msdyn_projecttaskdependencylinktype: v,
+          },
+        ]),
+      ).not.toThrow();
+    }
   });
 });
 
@@ -174,6 +219,97 @@ describe("validateUpdateEntities", () => {
         JSON.stringify([id]),
       ),
     ).toThrow(/roll up from its children/);
+  });
+});
+
+describe("parsePssError / dvPssErrorMessage", () => {
+  it("returns undefined for a plain OData error without PSS structure", () => {
+    expect(parsePssError({ error: { message: "Something went wrong" } })).toBeUndefined();
+  });
+
+  it("parses a raw top-level PSS error body (shape b)", () => {
+    const body = {
+      errorId: -1945829329,
+      errorKey: "E_BATCHFAILED",
+      ErrorMessage: "One of the batch requests failed",
+      failedBatchRequestIndex: 3,
+      failedBatchRequestError: {
+        errorId: -1945829343,
+        errorKey: "E_LIMITEXCEEDED_TASKLEVEL",
+        ErrorMessage: "Limit on level of task exceeded",
+      },
+    };
+    const result = parsePssError(body);
+    expect(result).toBeDefined();
+    expect(result!.outerKey).toBe("E_BATCHFAILED");
+    expect(result!.innerKey).toBe("E_LIMITEXCEEDED_TASKLEVEL");
+    expect(result!.failedBatchRequestIndex).toBe(3);
+    expect(result!.message).toContain("E_LIMITEXCEEDED_TASKLEVEL");
+  });
+
+  it("parses a PSS error embedded as JSON inside an OData error message (shape a)", () => {
+    const pssPayload = {
+      errorKey: "E_BATCHFAILED",
+      ErrorMessage: "One of the batch requests failed",
+      failedBatchRequestIndex: 2,
+      failedBatchRequestError: {
+        errorKey: "E_LIMITEXCEEDED_TASKLEVEL",
+        ErrorMessage: "Limit on level of task exceeded",
+      },
+    };
+    const body = { error: { message: JSON.stringify(pssPayload) } };
+    const result = parsePssError(body);
+    expect(result).toBeDefined();
+    expect(result!.innerKey).toBe("E_LIMITEXCEEDED_TASKLEVEL");
+    expect(result!.failedBatchRequestIndex).toBe(2);
+  });
+
+  it("dvPssErrorMessage falls back to dvErrorMessage for plain OData errors", () => {
+    const response = { status: 400, json: { error: { message: "Bad field" } } };
+    expect(dvPssErrorMessage(response)).toBe("Bad field");
+  });
+
+  it("dvPssErrorMessage extracts the PSS error message for PSS-shaped responses", () => {
+    const response = {
+      status: 400,
+      json: {
+        errorKey: "E_BATCHFAILED",
+        ErrorMessage: "One of the batch requests failed",
+        failedBatchRequestError: {
+          errorKey: "E_LIMITEXCEEDED_TASKLEVEL",
+          ErrorMessage: "Limit on level of task exceeded",
+        },
+      },
+    };
+    const msg = dvPssErrorMessage(response);
+    expect(msg).toContain("E_LIMITEXCEEDED_TASKLEVEL");
+    expect(msg).not.toBe("HTTP 400");
+  });
+});
+
+describe("validateUpdateEntities — null date guard", () => {
+  it("rejects null msdyn_start", () => {
+    expect(() =>
+      validateUpdateEntities([
+        { "@odata.type": TASK, msdyn_projecttaskid: guid(1), msdyn_start: null },
+      ]),
+    ).toThrow(/msdyn_start must not be null/);
+  });
+
+  it("rejects null msdyn_finish", () => {
+    expect(() =>
+      validateUpdateEntities([
+        { "@odata.type": TASK, msdyn_projecttaskid: guid(1), msdyn_finish: null },
+      ]),
+    ).toThrow(/msdyn_finish must not be null/);
+  });
+
+  it("accepts valid ISO date strings", () => {
+    expect(() =>
+      validateUpdateEntities([
+        { "@odata.type": TASK, msdyn_projecttaskid: guid(1), msdyn_start: "2026-07-01T00:00:00Z", msdyn_finish: "2026-07-05T00:00:00Z" },
+      ]),
+    ).not.toThrow();
   });
 });
 

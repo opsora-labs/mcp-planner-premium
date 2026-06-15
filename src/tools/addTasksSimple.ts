@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getApiBase } from "../config.js";
+import { getApiBase, getEnv } from "../config.js";
 import {
   dvReq,
   dvHeaders,
@@ -15,12 +15,22 @@ import type { ToolDef } from "./types.js";
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
 const isGuid = (s: string): boolean => GUID_RE.test(s);
 
-// FS/SS/FF/SF -> option-set values of msdyn_projecttaskdependencylinktype.
-const LINK_TYPE_VALUES: Record<string, number> = {
+// FS/SS/FF/SF -> option-set integers sent to PSS. Two value ranges exist;
+// the correct one is selected at runtime from DATAVERSE_LINK_TYPE_STYLE.
+export const LINK_TYPE_VALUES_GLOBAL: Record<string, number> = {
   FS: 192350000,
   SS: 192350001,
   FF: 192350002,
   SF: 192350003,
+};
+
+// EU/CRM4 tenants (confirmed via describe_option_set + live ScheduleAPI-AV-0043
+// rejection of 192350000): FinishToStart=1, StartToStart=3, FinishToFinish=0, StartToFinish=2.
+export const LINK_TYPE_VALUES_EU: Record<string, number> = {
+  FS: 1,
+  SS: 3,
+  FF: 0,
+  SF: 2,
 };
 
 export interface SimpleDependency {
@@ -102,6 +112,7 @@ export function buildTaskEntities(
   projectId: string,
   tasks: SimpleTask[],
   resolveBucketId: (bucket: string) => string,
+  linkTypeValues: Record<string, number> = LINK_TYPE_VALUES_GLOBAL,
 ): BuiltBatch {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
@@ -169,14 +180,28 @@ export function buildTaskEntities(
 
     for (const dep of t.dependsOn || []) {
       const predId = resolvePredecessorId(dep.on, t.ref);
+      // The lookup navigation properties are the PascalCase schema names
+      // (msdyn_PredecessorTask / msdyn_SuccessorTask), NOT the lowercase logical
+      // names. Lowercase keys make Dataverse OData reject the payload with
+      // "undeclared property ... which only has property annotations ... but no
+      // property value was found". The read side still uses the lowercase
+      // _value alias (that is a different, value-side name).
+      // PSS requires the project bind on the dependency entity too. Without it
+      // the API defaults to the zero GUID (00000000-…) which it then rejects as
+      // not matching the operation set's project (ScheduleAPI-OV-0001).
+      // On msdyn_projecttaskdependency ALL lookup nav-properties use the PascalCase
+      // schema name, not the lowercase logical name. msdyn_project@odata.bind causes
+      // "undeclared property 'msdyn_project' which only has property annotations"
+      // because the schema nav-property is msdyn_Project (capital P).
       const depEnt: Record<string, unknown> = {
         "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency",
         msdyn_projecttaskdependencyid: randomUUID(),
-        "msdyn_predecessortask@odata.bind": "/msdyn_projecttasks(" + predId + ")",
-        "msdyn_successortask@odata.bind": "/msdyn_projecttasks(" + id + ")",
+        "msdyn_Project@odata.bind": "/msdyn_projects(" + projectId + ")",
+        "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + predId + ")",
+        "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + id + ")",
       };
       if (dep.type) {
-        const v = LINK_TYPE_VALUES[dep.type];
+        const v = linkTypeValues[dep.type];
         if (v === undefined)
           throw new Error(
             "Task '" + t.ref + "': dependency type must be FS, SS, FF or SF.",
@@ -234,7 +259,7 @@ const taskSchema = z.object({
   milestone: z
     .boolean()
     .optional()
-    .describe("Mark as milestone. Cannot be set on create - returned in milestoneTaskIds to set via a follow-up update_tasks_batch."),
+    .describe("Request a milestone. Cannot be set via the API (PSS rejects msdyn_ismilestone on create and update). The taskId is returned in milestoneTaskIds so you can tell the user which tasks to flag manually in the Planner UI."),
   dependsOn: z
     .array(dependencySchema)
     .optional()
@@ -321,7 +346,11 @@ export const addTasksSimple: ToolDef = {
       return isGuid(b) ? b : nameToId[b.toLowerCase()];
     };
 
-    const built = buildTaskEntities(projectId, tasks, resolveBucketId);
+    const linkTypeValues =
+      getEnv().DATAVERSE_LINK_TYPE_STYLE === "eu"
+        ? LINK_TYPE_VALUES_EU
+        : LINK_TYPE_VALUES_GLOBAL;
+    const built = buildTaskEntities(projectId, tasks, resolveBucketId, linkTypeValues);
 
     // Defense in depth: the built collection must still pass the raw guardrails.
     validateAddEntities(built.entities);
@@ -343,7 +372,7 @@ export const addTasksSimple: ToolDef = {
       response: response.json || {},
       note:
         built.milestoneTaskIds.length > 0
-          ? "Queued. After 'Apply Changes to Plan' completes, set milestones via update_tasks_batch (msdyn_ismilestone=true) on milestoneTaskIds. New tasks are appended at the end. NOT saved until 'Apply Changes to Plan'."
+          ? "Queued. Milestones cannot be set via the API (PSS rejects msdyn_ismilestone on create and update) - the milestoneTaskIds list the tasks the user must flag as milestones manually in the Planner UI. New tasks are appended at the end. NOT saved until 'Apply Changes to Plan'."
           : "Queued. New tasks are appended at the end (reorder in the Planner UI if needed). NOT saved until 'Apply Changes to Plan'.",
     };
   },

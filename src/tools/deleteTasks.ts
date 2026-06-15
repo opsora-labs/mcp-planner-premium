@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
-import { dvReq, dvHeaders, dvErrorMessage, asArray } from "../dataverse.js";
+import { dvReq, dvHeaders, dvErrorMessage, asArray, assertGuid } from "../dataverse.js";
 import type { ToolDef } from "./types.js";
 
 const DELETABLE = [
@@ -12,6 +12,100 @@ const DELETABLE = [
   "msdyn_projectchecklist",
   "msdyn_projecttasktolabel",
 ];
+
+/**
+ * Converts the internal record list to the OData entity objects msdyn_PssDeleteV2
+ * expects in EntityCollection. The API uses the same OData entity format as
+ * msdyn_PssCreateV2 — NOT { EntityLogicalName, RecordId } descriptors (those
+ * cause "Invalid property 'EntityLogicalName' was found in entity crmbaseentity").
+ * Primary key field name follows the consistent Dataverse pattern: <logicalname>id.
+ */
+export function buildDeleteEntities(
+  records: { entityLogicalName: string; recordId: string }[],
+): any[] {
+  return records.map((r) => ({
+    "@odata.type": "Microsoft.Dynamics.CRM." + r.entityLogicalName,
+    [r.entityLogicalName + "id"]: r.recordId,
+  }));
+}
+
+/**
+ * Sorts task IDs so children are deleted before their parents (leaves first).
+ * PSS processes the batch sequentially: if a parent is deleted first, its
+ * children's IDs become invalid mid-batch (E_INVALIDENTITYUID).
+ *
+ * parentMap: task id (lowercase) -> parent task id (lowercase) or null/undefined.
+ * Tasks whose parent is not in the delete set are treated as roots.
+ * Pure and unit-testable — the caller supplies the parent map from a Dataverse read.
+ */
+export function sortTaskIdsLeavesFirst(
+  taskIds: string[],
+  parentMap: Map<string, string | null | undefined>,
+): string[] {
+  if (taskIds.length <= 1) return taskIds;
+
+  const deleteSet = new Set(taskIds.map((id) => id.toLowerCase()));
+
+  // Build a children-of map restricted to the delete set.
+  const childrenOf = new Map<string, string[]>();
+  for (const id of taskIds) {
+    const lo = id.toLowerCase();
+    const parentId = parentMap.get(lo);
+    if (parentId && deleteSet.has(parentId)) {
+      if (!childrenOf.has(parentId)) childrenOf.set(parentId, []);
+      childrenOf.get(parentId)!.push(lo);
+    }
+  }
+
+  // Iterative post-order DFS: visit all children before the node itself → leaves
+  // first. Iterative (not recursive) so there is no call-stack depth limit — works
+  // at any hierarchy depth up to Planner Premium's maximum.
+  const result: string[] = [];
+  const visited = new Set<string>();
+
+  const visitIterative = (rootId: string): void => {
+    // Stack holds [nodeId, childrenIterator]. We push a node, process its
+    // children, then emit the node itself — achieving post-order without recursion.
+    const stack: Array<{ id: string; childIdx: number }> = [];
+    const lo0 = rootId.toLowerCase();
+    if (visited.has(lo0)) return;
+    stack.push({ id: rootId, childIdx: 0 });
+
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1];
+      const lo = top.id.toLowerCase();
+      const children = childrenOf.get(lo) ?? [];
+
+      if (top.childIdx < children.length) {
+        // Process next child.
+        const childId = children[top.childIdx++];
+        if (!visited.has(childId)) {
+          stack.push({ id: childId, childIdx: 0 });
+        }
+      } else {
+        // All children processed — emit this node.
+        stack.pop();
+        if (!visited.has(lo)) {
+          visited.add(lo);
+          result.push(top.id);
+        }
+      }
+    }
+  };
+
+  // Start from roots (no parent inside the delete set).
+  for (const id of taskIds) {
+    const lo = id.toLowerCase();
+    const parentId = parentMap.get(lo);
+    if (!parentId || !deleteSet.has(parentId)) visitIterative(id);
+  }
+  // Catch anything not yet reached (disconnected / missing from parentMap).
+  for (const id of taskIds) {
+    if (!visited.has(id.toLowerCase())) result.push(id);
+  }
+
+  return result;
+}
 
 /**
  * Validates the delete record list for msdyn_PssDeleteV2. Whole-plan deletes
@@ -50,11 +144,17 @@ export const deleteTasks: ToolDef = {
   name: "delete_tasks_batch",
   title: "Delete Tasks from Plan (Batch)",
   description:
-    "Deletes up to 200 items (tasks, dependencies, assignments, buckets, checklists) in ONE call via msdyn_PssDeleteV2, inside an open change session. REQUIRES confirmed=true after an explicit per-record user confirmation. Provide at least one of taskIds (task GUIDs) or records. Deleting whole plans is hard-blocked by policy. Deletions are saved only after 'Apply Changes to Plan'.",
+    "Deletes up to 200 items (tasks, dependencies, assignments, buckets, checklists) in ONE call via msdyn_PssDeleteV2, inside an open change session. REQUIRES confirmed=true after an explicit per-record user confirmation. Provide at least one of taskIds (task GUIDs) or records. When projectId is given with taskIds, the server fetches the plan hierarchy and automatically sorts the delete batch leaves-first (children before parents) — PSS requires this order or it returns E_INVALIDENTITYUID mid-batch. Deleting whole plans is hard-blocked by policy. Deletions are saved only after 'Apply Changes to Plan'.",
   inputSchema: {
     operationSetId: z
       .string()
       .describe("GUID of the open OperationSet (from 'Start Change Session')."),
+    projectId: z
+      .string()
+      .optional()
+      .describe(
+        "GUID of the plan the tasks belong to. When provided alongside taskIds, the server fetches the task hierarchy and auto-sorts the batch leaves-first so PSS does not reject children whose parent was already deleted mid-batch (E_INVALIDENTITYUID). Strongly recommended when deleting a hierarchy of tasks.",
+      ),
     taskIds: z
       .union([z.string(), z.array(z.string())])
       .optional()
@@ -75,6 +175,7 @@ export const deleteTasks: ToolDef = {
   },
   handler: async (input: {
     operationSetId: string;
+    projectId?: unknown;
     taskIds?: unknown;
     records?: unknown;
     confirmed: boolean;
@@ -89,12 +190,47 @@ export const deleteTasks: ToolDef = {
       );
     }
 
-    const records: { entityLogicalName: string; recordId: string }[] = [];
+    // Collect task IDs from the convenience parameter before expanding to records,
+    // so we can sort them leaves-first if projectId is provided.
+    let taskIdList: string[] = [];
     if (input.taskIds !== undefined && input.taskIds !== null) {
-      const ids = asArray<string>(input.taskIds, "taskIds");
-      for (const id of ids)
-        records.push({ entityLogicalName: "msdyn_projecttask", recordId: id });
+      taskIdList = asArray<string>(input.taskIds, "taskIds");
     }
+
+    // Auto-sort task IDs leaves-first when projectId is provided.
+    if (taskIdList.length > 1 && input.projectId) {
+      const projectId = assertGuid(String(input.projectId), "projectId");
+      const res = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projecttasks?$select=msdyn_projecttaskid,_msdyn_parenttask_value" +
+            "&$filter=_msdyn_project_value eq " +
+            projectId +
+            "&$top=1500",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (res.status < 400) {
+        const parentMap = new Map<string, string | null>();
+        for (const t of res.json?.value ?? []) {
+          parentMap.set(
+            String(t.msdyn_projecttaskid).toLowerCase(),
+            t._msdyn_parenttask_value
+              ? String(t._msdyn_parenttask_value).toLowerCase()
+              : null,
+          );
+        }
+        taskIdList = sortTaskIdsLeavesFirst(taskIdList, parentMap);
+      }
+      // If the fetch fails, proceed with caller order (best-effort).
+    }
+
+    const records: { entityLogicalName: string; recordId: string }[] = [];
+    for (const id of taskIdList)
+      records.push({ entityLogicalName: "msdyn_projecttask", recordId: id });
     if (input.records !== undefined && input.records !== null) {
       const raw = asArray<{ entityLogicalName: string; recordId: string }>(
         input.records,
@@ -111,10 +247,7 @@ export const deleteTasks: ToolDef = {
       method: "POST",
       headers: dvHeaders({ json: true }),
       body: {
-        EntityCollection: records.map((r) => ({
-          EntityLogicalName: r.entityLogicalName,
-          RecordId: r.recordId,
-        })),
+        EntityCollection: buildDeleteEntities(records),
         OperationSetId: operationSetId,
       },
     });

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
-import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
+import { dvReq, dvHeaders, dvPssErrorMessage, parsePssError, assertGuid } from "../dataverse.js";
 import type { ToolDef } from "./types.js";
 
 // Execute OperationSet - msdyn_ExecuteOperationSetV1 (commits the transaction, async)
@@ -25,8 +25,20 @@ export const applyChanges: ToolDef = {
     });
 
     if (response.status >= 400) {
+      const pss = parsePssError(response.json || {});
+      const innerKey = pss?.innerKey ?? pss?.outerKey;
+      if (innerKey === "E_LIMITEXCEEDED_TASKLEVEL") {
+        const idx = pss?.failedBatchRequestIndex;
+        throw new Error(
+          "TASK_LEVEL_LIMIT_EXCEEDED: The plan has reached its PSS task-nesting depth limit." +
+          (idx !== undefined ? " PSS rejected the operation at batch index " + idx + "." : "") +
+          " Options: (a) use a shallower hierarchy in new tasks, (b) delete tasks to reduce depth," +
+          " (c) create a new plan. Call get_plan_summary to check currentMaxOutlineLevel." +
+          " [pssErrorKey=" + innerKey + "]",
+        );
+      }
       throw new Error(
-        "execute_operation_set failed (" + response.status + "): " + dvErrorMessage(response),
+        "execute_operation_set failed (" + response.status + "): " + dvPssErrorMessage(response),
       );
     }
     return {

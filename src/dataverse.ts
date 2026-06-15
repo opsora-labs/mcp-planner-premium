@@ -127,6 +127,80 @@ export function dvErrorMessage(response: DvResponse): string {
   return (body.error && body.error.message) || "HTTP " + response.status;
 }
 
+export interface PssErrorDetail {
+  outerKey: string | undefined;
+  innerKey: string | undefined;
+  failedBatchRequestIndex: number | undefined;
+  message: string;
+}
+
+/**
+ * Extracts structured PSS error information from a Dataverse response body.
+ * PSS errors arrive in two shapes:
+ *   (a) OData wrapper: { error: { message: "<json-or-text>" } }
+ *   (b) Raw PSS top-level: { errorKey, ErrorMessage, failedBatchRequestError: { errorKey, ErrorMessage } }
+ * Returns undefined when the response body doesn't look like a PSS error.
+ */
+export function parsePssError(body: any): PssErrorDetail | undefined {
+  if (!body || typeof body !== "object") return undefined;
+
+  // Shape (b): raw PSS top-level
+  if (typeof body.errorKey === "string" || typeof body.ErrorMessage === "string") {
+    const inner = body.failedBatchRequestError;
+    return {
+      outerKey: body.errorKey,
+      innerKey: inner?.errorKey,
+      failedBatchRequestIndex:
+        typeof body.failedBatchRequestIndex === "number"
+          ? body.failedBatchRequestIndex
+          : undefined,
+      message:
+        (inner?.ErrorMessage || body.ErrorMessage || body.errorKey || "") +
+        (inner ? " (inner: " + (inner.errorKey || "") + " — " + (inner.ErrorMessage || "") + ")" : ""),
+    };
+  }
+
+  // Shape (a): OData wrapper — try to JSON-parse the message field for nested PSS JSON
+  const odataMsg = body.error?.message;
+  if (typeof odataMsg === "string") {
+    const trimmed = odataMsg.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (typeof parsed.errorKey === "string" || typeof parsed.ErrorMessage === "string") {
+          const inner = parsed.failedBatchRequestError;
+          return {
+            outerKey: parsed.errorKey,
+            innerKey: inner?.errorKey,
+            failedBatchRequestIndex:
+              typeof parsed.failedBatchRequestIndex === "number"
+                ? parsed.failedBatchRequestIndex
+                : undefined,
+            message:
+              (inner?.ErrorMessage || parsed.ErrorMessage || parsed.errorKey || "") +
+              (inner ? " (inner: " + (inner.errorKey || "") + " — " + (inner.ErrorMessage || "") + ")" : ""),
+          };
+        }
+      } catch {
+        // not JSON — fall through
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Like dvErrorMessage but also unpacks PSS-specific error structures so callers
+ * receive meaningful detail rather than a raw JSON blob or "HTTP 400".
+ */
+export function dvPssErrorMessage(response: DvResponse): string {
+  const body = response.json || {};
+  const pss = parsePssError(body);
+  if (pss) return pss.message || "HTTP " + response.status;
+  return dvErrorMessage(response);
+}
+
 /**
  * Shared error handling for the PSS batch-create calls (msdyn_PssCreateV2),
  * used by both the raw and ergonomic add-task tools. Throws on HTTP error.
