@@ -174,7 +174,7 @@ container loudly instead of failing per-request).
 | `DATAVERSE_ORG_URL` | yes | — | `https://contoso.crm.dynamics.com` |
 | `TENANT_ID` | yes when `AUTH_MODE=validate` | — | Entra tenant GUID, e.g. `00000000-0000-0000-0000-000000000000` |
 | `AUTH_MODE` | no | `validate` | `validate` = verify inbound JWT; `insecure-passthrough` = skip (LOCAL DEV ONLY) |
-| `MCP_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration your MCP host (Langdock, Claude, Cursor, …) uses for OAuth — the same value you enter in the host's "Client ID" field. When set, the server rejects any token not issued to this app. |
+| `ENTRA_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration your MCP host (Langdock, Claude, Cursor, …) uses for OAuth — the same value you enter in the host's "Client ID" field. When set, the server rejects any token not issued to this app. |
 | `ALLOWED_HOSTS` | no | — | Extra Host(s) to allow (e.g. a custom domain). The Azure Container Apps FQDN is **auto-derived** at runtime, so you do not set it here. DNS-rebinding protection turns on automatically once a host is known. |
 | `ALLOWED_ORIGINS` | no | — | Comma list of allowed `Origin` headers (only checked when the client sends one) |
 | `PORT` | no | `3000` | Port the container listens on (plain HTTP). TLS is terminated by the cloud ingress (ACA / reverse proxy), not by this server. |
@@ -186,7 +186,7 @@ container loudly instead of failing per-request).
 **Inbound token validation (`AUTH_MODE=validate`, the default):** before
 forwarding the bearer to Dataverse, the server verifies its Entra signature
 (JWKS), `exp`/`nbf`, issuer (your tenant), audience (your Dataverse org), and —
-if `MCP_CLIENT_ID` is set — that the token was issued to your app. Forged,
+if `ENTRA_CLIENT_ID` is set — that the token was issued to your app. Forged,
 expired, foreign-tenant or foreign-app tokens are rejected with `401` before any
 Dataverse call. See [SECURITY.md](./SECURITY.md) for the full security posture.
 
@@ -226,7 +226,7 @@ az containerapp create \
   --env-vars \
     DATAVERSE_ORG_URL=https://contoso.crm.dynamics.com \
     TENANT_ID=00000000-0000-0000-0000-000000000000 \
-    MCP_CLIENT_ID=11111111-1111-1111-1111-111111111111
+    ENTRA_CLIENT_ID=11111111-1111-1111-1111-111111111111
 
 # Read the assigned URL afterwards (not needed for the app to protect itself):
 az containerapp show -g <rg> -n mcp-planner-premium \
@@ -259,7 +259,7 @@ Then on the app:
 - **Certificates & secrets → New client secret** — copy the value immediately
 - **API permissions → Add a permission → APIs my organisation uses → `Dataverse`** → delegated `user_impersonation` → Grant admin consent
 
-The app's **Application (client) ID** is what goes into both Langdock and `MCP_CLIENT_ID` below.
+The app's **Application (client) ID** is what goes into both Langdock and `ENTRA_CLIENT_ID` below.
 
 ### 2. Add the connector in Langdock
 
@@ -273,7 +273,7 @@ Settings → Integrations → **Connect remote MCP** → **Advanced OAuth (witho
 - **Scopes**: `https://contoso.crm.dynamics.com/user_impersonation offline_access openid profile`
 - **Custom header**: `Authorization` = `Bearer {{ access_token }}`
 
-Set `MCP_CLIENT_ID` on the container app to the same client ID so the server pins
+Set `ENTRA_CLIENT_ID` on the container app to the same client ID so the server pins
 inbound tokens to this app and rejects anything else.
 
 Run **Test connection** — it should list the tools.

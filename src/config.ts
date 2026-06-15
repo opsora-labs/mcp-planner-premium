@@ -33,7 +33,7 @@ const EnvSchema = z
     // Application (client) id of the MCP host's Entra app registration (the same
     // value the MCP client uses as its OAuth client ID). When set, the inbound
     // token's appid/azp must match it — rejects tokens from any other app.
-    MCP_CLIENT_ID: z.string().optional(),
+    ENTRA_CLIENT_ID: z.string().optional(),
 
     // DNS-rebinding protection for the Streamable-HTTP transport. Comma lists.
     // The ACA FQDN is auto-derived at runtime, so ALLOWED_HOSTS is only needed

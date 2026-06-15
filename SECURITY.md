@@ -39,7 +39,7 @@ roadmap item in §9.
 | 2.3 | TLS for all transport | ✅ Done | Terminated by Azure Container Apps ingress (HTTPS only); HSTS header set via helmet. |
 | 2.4 | No token logged or persisted | ✅ Done | pino `redact` censors `authorization`/`access_token`/`refresh_token` ([`src/logger.ts`](src/logger.ts)); request bodies are never logged. Verified in tests. |
 | 2.5 | Rate limiting / DoS protection | ✅ Done | Per-IP rate limit on `/mcp` (`express-rate-limit`), 2 MB JSON body cap, request/header timeouts ([`src/app.ts`](src/app.ts), [`src/index.ts`](src/index.ts)). |
-| 2.6 | Confused-deputy prevention | ⚠️ Partial | `appid`/`azp` pinning (`MCP_CLIENT_ID`) ensures the token came from our app; network ingress restriction is an operator control (§5.3). Full prevention requires OBO (§9). |
+| 2.6 | Confused-deputy prevention | ⚠️ Partial | `appid`/`azp` pinning (`ENTRA_CLIENT_ID`) ensures the token came from our app; network ingress restriction is an operator control (§5.3). Full prevention requires OBO (§9). |
 | 2.7 | Tool input validation | ✅ Done | Zod schemas per tool + hand-written guardrails (allow-lists, GUID checks, 200-entity cap, bind-alias traps). |
 | 2.8 | Least privilege | ✅ Done | Server holds no credentials; every call runs as the end user's delegated token. Tool scope is structural Planner writes only; reads/text edits are out of scope (routed to the generic Dataverse tool). |
 | 2.9 | Tool annotations (read-only/destructive hints) | ✅ Done | `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint` per tool ([`src/tools/index.ts`](src/tools/index.ts)). Advisory only — not relied on for enforcement. |

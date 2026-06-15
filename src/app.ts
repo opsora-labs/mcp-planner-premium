@@ -90,7 +90,7 @@ export function buildApp(): Express {
         await verifyAccessToken(bearer, {
           tenantId: env.TENANT_ID as string,
           audience: getAudiences(),
-          clientId: env.MCP_CLIENT_ID,
+          clientId: env.ENTRA_CLIENT_ID,
         });
       } catch (e: unknown) {
         logger.warn({ err: errMessage(e) }, "inbound_token_rejected");
