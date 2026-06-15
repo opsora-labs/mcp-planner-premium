@@ -28,7 +28,7 @@ export const getTask: ToolDef = {
           "/msdyn_projecttasks(" +
           taskId +
           ")?$select=msdyn_projecttaskid,msdyn_subject,msdyn_description," +
-          "msdyn_start,msdyn_finish,msdyn_actualstart,msdyn_actualfinish," +
+          "msdyn_start,msdyn_finish," +
           "msdyn_progress,msdyn_effort,msdyn_remainingeffort,msdyn_duration," +
           "msdyn_outlinelevel,msdyn_displaysequence,msdyn_ismilestone,msdyn_priority," +
           "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value" +
@@ -119,8 +119,6 @@ export const getTask: ToolDef = {
         description: t.msdyn_description ?? null,
         start: t.msdyn_start ?? null,
         finish: t.msdyn_finish ?? null,
-        actualStart: t.msdyn_actualstart ?? null,
-        actualFinish: t.msdyn_actualfinish ?? null,
         progressPercent:
           typeof t.msdyn_progress === "number" ? Math.round(t.msdyn_progress * 100) : null,
         effortHours: t.msdyn_effort ?? null,
