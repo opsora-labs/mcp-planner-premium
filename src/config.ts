@@ -15,9 +15,11 @@ const EnvSchema = z
       .url()
       .transform((s) => s.replace(/\/+$/, "")),
 
-    // Default 443 (HTTPS port the ingress exposes). For local development set
-    // PORT to a non-privileged port, e.g. PORT=3000.
-    PORT: z.coerce.number().int().positive().default(443),
+    // Port the server listens on inside the container. ACA (and any other cloud
+    // ingress) terminates TLS externally, so the container only ever receives
+    // plain HTTP. Default 3000; no privileged port or special Linux capabilities
+    // needed. Override for local dev if 3000 is taken.
+    PORT: z.coerce.number().int().positive().default(3000),
 
     // Inbound-token policy:
     //   validate (default) - cryptographically verify the bearer (jose) before
@@ -28,9 +30,10 @@ const EnvSchema = z
     // Entra tenant that issues the tokens (GUID). Required when AUTH_MODE=validate.
     TENANT_ID: z.string().optional(),
 
-    // Application (client) id of the Langdock Entra app registration. When set,
-    // the inbound token's appid/azp must match it (pins the calling app).
-    LANGDOCK_CLIENT_ID: z.string().optional(),
+    // Application (client) id of the MCP host's Entra app registration (the same
+    // value the MCP client uses as its OAuth client ID). When set, the inbound
+    // token's appid/azp must match it — rejects tokens from any other app.
+    MCP_CLIENT_ID: z.string().optional(),
 
     // DNS-rebinding protection for the Streamable-HTTP transport. Comma lists.
     // The ACA FQDN is auto-derived at runtime, so ALLOWED_HOSTS is only needed

@@ -174,10 +174,10 @@ container loudly instead of failing per-request).
 | `DATAVERSE_ORG_URL` | yes | — | `https://contoso.crm.dynamics.com` |
 | `TENANT_ID` | yes when `AUTH_MODE=validate` | — | Entra tenant GUID, e.g. `00000000-0000-0000-0000-000000000000` |
 | `AUTH_MODE` | no | `validate` | `validate` = verify inbound JWT; `insecure-passthrough` = skip (LOCAL DEV ONLY) |
-| `LANGDOCK_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration Langdock uses for OAuth (the same value you enter in Langdock's "Client ID" field). When set, the server rejects any token not issued to this app. |
+| `MCP_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration your MCP host (Langdock, Claude, Cursor, …) uses for OAuth — the same value you enter in the host's "Client ID" field. When set, the server rejects any token not issued to this app. |
 | `ALLOWED_HOSTS` | no | — | Extra Host(s) to allow (e.g. a custom domain). The Azure Container Apps FQDN is **auto-derived** at runtime, so you do not set it here. DNS-rebinding protection turns on automatically once a host is known. |
 | `ALLOWED_ORIGINS` | no | — | Comma list of allowed `Origin` headers (only checked when the client sends one) |
-| `PORT` | no | `443` | HTTPS port the ingress exposes. For local dev use a non-privileged port (`PORT=3000`). |
+| `PORT` | no | `3000` | Port the container listens on (plain HTTP). TLS is terminated by the cloud ingress (ACA / reverse proxy), not by this server. |
 | `REQUEST_TIMEOUT_MS` | no | `30000` | Outbound Dataverse call timeout |
 | `RATE_LIMIT_PER_MIN` | no | `120` | Per-IP requests/min on `/mcp` |
 | `JSON_BODY_LIMIT` | no | `2mb` | Max request body |
@@ -186,7 +186,7 @@ container loudly instead of failing per-request).
 **Inbound token validation (`AUTH_MODE=validate`, the default):** before
 forwarding the bearer to Dataverse, the server verifies its Entra signature
 (JWKS), `exp`/`nbf`, issuer (your tenant), audience (your Dataverse org), and —
-if `LANGDOCK_CLIENT_ID` is set — that the token was issued to your app. Forged,
+if `MCP_CLIENT_ID` is set — that the token was issued to your app. Forged,
 expired, foreign-tenant or foreign-app tokens are rejected with `401` before any
 Dataverse call. See [SECURITY.md](./SECURITY.md) for the full security posture.
 
@@ -195,10 +195,9 @@ Dataverse call. See [SECURITY.md](./SECURITY.md) for the full security posture.
 ```bash
 npm install
 npm run build
-# Local dev: use a non-privileged port and skip token validation.
+# Local dev: skip token validation. PORT defaults to 3000.
 DATAVERSE_ORG_URL=https://contoso.crm.dynamics.com \
   AUTH_MODE=insecure-passthrough \
-  PORT=3000 \
   npm start
 # health check
 curl localhost:3000/healthz
@@ -222,12 +221,12 @@ az containerapp create \
   -g <rg> -n mcp-planner-premium \
   --environment <aca-env> \
   --image <registry>.azurecr.io/mcp-planner-premium:1 \
-  --target-port 443 --ingress external \
+  --target-port 3000 --ingress external \
   --min-replicas 0 --max-replicas 3 \
   --env-vars \
     DATAVERSE_ORG_URL=https://contoso.crm.dynamics.com \
     TENANT_ID=00000000-0000-0000-0000-000000000000 \
-    LANGDOCK_CLIENT_ID=11111111-1111-1111-1111-111111111111
+    MCP_CLIENT_ID=11111111-1111-1111-1111-111111111111
 
 # Read the assigned URL afterwards (not needed for the app to protect itself):
 az containerapp show -g <rg> -n mcp-planner-premium \
@@ -242,7 +241,11 @@ az containerapp ingress access-restriction set \
 The public URL's `/mcp` path is your MCP endpoint. If you later map a **custom
 domain**, add it to `ALLOWED_HOSTS` (the auto-derived ACA host stays allowed too).
 
-## Wire up the MCP host (example: Langdock)
+## Wire up an MCP host
+
+This server works with any MCP host that supports remote servers with OAuth (Langdock,
+Claude, Cursor, MCP Inspector, …). The steps below use Langdock as the example; adapt
+the OAuth callback URL and connector UI for your host.
 
 ### 1. Create a dedicated Entra app registration
 
@@ -250,13 +253,13 @@ In the [Azure Portal](https://portal.azure.com) → **App registrations → New 
 
 - **Name:** `Planner-Premium-MCP` (or similar)
 - **Supported account types:** Single tenant
-- **Redirect URI (Web):** Langdock's OAuth callback URL — Langdock shows this exact URL when you configure the connector (copy it from there)
+- **Redirect URI (Web):** your MCP host's OAuth callback URL — the host shows this exact URL when you configure the OAuth connector (copy it from there)
 
 Then on the app:
 - **Certificates & secrets → New client secret** — copy the value immediately
 - **API permissions → Add a permission → APIs my organisation uses → `Dataverse`** → delegated `user_impersonation` → Grant admin consent
 
-The app's **Application (client) ID** is what goes into both Langdock and `LANGDOCK_CLIENT_ID` below.
+The app's **Application (client) ID** is what goes into both Langdock and `MCP_CLIENT_ID` below.
 
 ### 2. Add the connector in Langdock
 
@@ -270,7 +273,7 @@ Settings → Integrations → **Connect remote MCP** → **Advanced OAuth (witho
 - **Scopes**: `https://contoso.crm.dynamics.com/user_impersonation offline_access openid profile`
 - **Custom header**: `Authorization` = `Bearer {{ access_token }}`
 
-Set `LANGDOCK_CLIENT_ID` on the container app to the same client ID so the server pins
+Set `MCP_CLIENT_ID` on the container app to the same client ID so the server pins
 inbound tokens to this app and rejects anything else.
 
 Run **Test connection** — it should list the tools.
