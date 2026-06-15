@@ -13,20 +13,25 @@ prescribed order, record every result as you go, then write a complete markdown 
 
 ## Before you start
 
-Ask the user:
+Ask the user **both** questions before calling any tool:
 
-1. **Write mode?** — "Should I run the full write lifecycle (creates a real test plan in Planner Premium)?
-   Say YES to run, or NO for read-only."
+1. **Which phases?** — "Which phases should I run? Reply with a comma list:
+   - `0` — Preflight (whoami + tool inventory) — always recommended
+   - `1` — Read sweep (all 10 read tools, no writes)
+   - `2` — Write lifecycle (creates a real test plan with 3 buckets and 10 tasks, verifies all attributes, cleans up)
+   - `3` — Guardrail tests (13 negative-path tests, no real data needed)
+   
+   Examples: `0,1,2,3` (full run), `0,1` (read-only), `3` (guardrails only), `0,1,2` (write but skip guardrails)"
+
+2. **Write mode (only if Phase 2 is selected)** — "Phase 2 creates a test plan, 3 buckets, and 10 tasks with rich attributes, then cleans everything up. Confirm YES to proceed, or NO to skip Phase 2."
 
 Keep a running tally in memory: `PASS`, `FAIL`, `SKIP` counts. Do **not** stop on first failure —
-continue all phases and report everything at the end.
+continue all selected phases and report everything at the end.
 
-> **Mind the tool-call budget.** A full Write-mode run (Phases 0-3) makes ~50+ tool
-> calls and can hit a session's tool-call limit before Phase 3. If you are running
-> Write mode and notice you are deep into Phase 2, **prefer running Phase 3 as its own
-> session** (it needs no real data — see the note at the top of Phase 3). When you split,
-> say so in the report so the missed steps read as `SKIP (run separately)`, not silent
-> gaps.
+> **Mind the tool-call budget.** A full run (Phases 0-3) makes ~70+ tool calls. If you notice
+> you are running low on budget mid-Phase 2, finish Phase 2 cleanup first, then start a fresh
+> session for Phase 3 (it is self-contained and needs no real data). When you split, mark the
+> skipped steps as `SKIP (run separately)`, not silent gaps.
 
 The environment is determined by the MCP server's connection — do **not** ask the user for it.
 Populate the `**Environment:**` field in the report from the `whoami` response (Step 0.2) if it
@@ -217,225 +222,328 @@ Call: `describe_option_set` with:
 
 ## Phase 2 — Write lifecycle (only if user approved writes)
 
-If the user said NO to write mode, record all steps below as `SKIP (write mode disabled)` and
-move to Phase 3.
+If Phase 2 was not selected or the user said NO to write mode, record all steps as
+`SKIP (write mode disabled)` and move to Phase 3.
 
-**Naming convention:** use the plan name `ZZ-MCP-TEST-<today's date YYYYMMDD>` so it is clearly
-identifiable as a test plan. The plan cannot be deleted via the API — remind the user to remove it
-manually in the Planner UI after the test.
+**Naming convention:** use `ZZ-MCP-TEST-<YYYYMMDD>` — clearly identifiable as a test plan.
+The plan cannot be deleted via the API — remind the user to remove it manually in the Planner UI.
+
+---
 
 ### Step 2.1 — create_plan
 
 Call: `create_plan` with:
 ```json
-{ "subject": "ZZ-MCP-TEST-<YYYYMMDD>", "description": "MCP interactive test run" }
+{ "subject": "ZZ-MCP-TEST-<YYYYMMDD>", "description": "MCP interactive test run — multi-bucket rich hierarchy" }
 ```
 
-**Pass criteria:**
-- `ok` is `true`
-- `projectId` is a non-empty string (GUID)
+**Pass criteria:** `ok: true`, `projectId` is a GUID.
 
-Save `projectId` as `NEW_PROJECT_ID`.
+Save as `NEW_PROJECT_ID`.
 
-### Step 2.2 — add_bucket
+---
 
-Call: `add_bucket` with:
+### Steps 2.2a–2.2c — add three buckets
+
+Call `add_bucket` three times. Each call routes through PSS and polls for completion (~10-30 s).
+
 ```json
-{ "projectId": "<NEW_PROJECT_ID>", "name": "Sprint 1" }
+{ "projectId": "<NEW_PROJECT_ID>", "name": "Planning" }
+{ "projectId": "<NEW_PROJECT_ID>", "name": "Development" }
+{ "projectId": "<NEW_PROJECT_ID>", "name": "Testing" }
 ```
 
-**Pass criteria:**
-- `ok` is `true`
-- `bucketId` is a non-empty string (GUID)
-- `note` is present (indicates PSS persistence status — the tool now routes through
-  PSS internally and polls for completion, so it may take ~10-30 s)
+**Pass criteria each:** `ok: true`, `bucketId` is a GUID, `note` contains "Bucket persisted".
 
-> `add_bucket` no longer does a direct Dataverse insert. It opens its own PSS
-> OperationSet, queues the bucket, applies, and polls until the session completes.
-> The `note` field will say either "Bucket persisted" or include an `operationSetId`
-> if the poll timed out (rare).
+Save bucket IDs as `BID_PLANNING`, `BID_DEVELOPMENT`, `BID_TESTING`.
 
-Save `bucketId` as `NEW_BUCKET_ID`.
+---
 
 ### Step 2.3 — start_change_session
 
 Call: `start_change_session` with:
 ```json
-{ "projectId": "<NEW_PROJECT_ID>", "description": "Interactive E2E test — add tasks" }
+{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E test — rich hierarchy" }
 ```
 
-**Pass criteria:**
-- `ok` is `true`
-- `operationSetId` is a non-empty string (GUID)
+**Pass criteria:** `ok: true`, `operationSetId` is a GUID. Save as `OP_SET_1`.
 
-Save as `OP_SET_1`.
+---
 
-### Step 2.4 — add_tasks (6-level hierarchy)
+### Step 2.4 — add_tasks (10 tasks, 3-level hierarchy, 3 buckets, 2 FS dependencies)
 
-Call: `add_tasks` with this exact payload (6-level parent chain + 1 sibling + 1 FS dependency):
+This payload exercises: multi-bucket assignment, parent hierarchy, dates, effort, description,
+priority, and dependencies across roots. All attributes are set on the ergonomic path.
 
 ```json
 {
   "operationSetId": "<OP_SET_1>",
   "projectId": "<NEW_PROJECT_ID>",
   "tasks": [
-    { "ref": "L1", "subject": "Level 1 (root)",    "bucket": "Sprint 1" },
-    { "ref": "L2", "subject": "Level 2",            "bucket": "Sprint 1", "parent": "L1" },
-    { "ref": "L3", "subject": "Level 3",            "bucket": "Sprint 1", "parent": "L2" },
-    { "ref": "L4", "subject": "Level 4",            "bucket": "Sprint 1", "parent": "L3" },
-    { "ref": "L5", "subject": "Level 5",            "bucket": "Sprint 1", "parent": "L4" },
-    { "ref": "L6", "subject": "Level 6 (leaf)",     "bucket": "Sprint 1", "parent": "L5" },
-    { "ref": "SIB","subject": "Sibling of L2",      "bucket": "Sprint 1", "parent": "L1",
-      "dependsOn": [{ "on": "L2", "type": "FS" }] }
+    {
+      "ref": "R1",
+      "subject": "Programme Kick-off",
+      "bucket": "Planning"
+    },
+    {
+      "ref": "R1A",
+      "subject": "Stakeholder Alignment",
+      "bucket": "Planning",
+      "parent": "R1",
+      "start": "2026-09-01",
+      "finish": "2026-09-05",
+      "effortHours": 16,
+      "description": "Align all key stakeholders before kick-off",
+      "priority": 2
+    },
+    {
+      "ref": "R1A1",
+      "subject": "Draft Meeting Agenda",
+      "bucket": "Planning",
+      "parent": "R1A",
+      "description": "Prepare detailed agenda for kick-off meeting"
+    },
+    {
+      "ref": "R1A2",
+      "subject": "Send Invitations",
+      "bucket": "Planning",
+      "parent": "R1A",
+      "dependsOn": [{ "on": "R1A1", "type": "FS" }]
+    },
+    {
+      "ref": "R1B",
+      "subject": "Technical Setup",
+      "bucket": "Development",
+      "parent": "R1",
+      "start": "2026-09-08",
+      "finish": "2026-09-12"
+    },
+    {
+      "ref": "R1B1",
+      "subject": "Environment Configuration",
+      "bucket": "Development",
+      "parent": "R1B",
+      "effortHours": 8
+    },
+    {
+      "ref": "R2",
+      "subject": "Delivery Phase",
+      "bucket": "Development",
+      "start": "2026-09-15",
+      "finish": "2026-09-30"
+    },
+    {
+      "ref": "R2A",
+      "subject": "Development Sprint",
+      "bucket": "Development",
+      "parent": "R2",
+      "effortHours": 40,
+      "description": "Primary development sprint"
+    },
+    {
+      "ref": "R2A1",
+      "subject": "Core Feature Build",
+      "bucket": "Development",
+      "parent": "R2A",
+      "effortHours": 32,
+      "description": "Primary deliverable — core feature implementation",
+      "dependsOn": [{ "on": "R1B1", "type": "FS" }]
+    },
+    {
+      "ref": "R2B",
+      "subject": "QA and Sign-off",
+      "bucket": "Testing",
+      "parent": "R2",
+      "priority": 2
+    }
   ]
 }
 ```
 
 **Pass criteria:**
 - `ok` is `true`
-- `taskRefs` is an object with 7 keys (`L1`, `L2`, `L3`, `L4`, `L5`, `L6`, `SIB`), each a GUID string
-- `dependencyIds` is an array (should contain 1 GUID for the SIB→L2 FS dependency entity)
+- `taskRefs` has 10 keys: `R1`, `R1A`, `R1A1`, `R1A2`, `R1B`, `R1B1`, `R2`, `R2A`, `R2A1`, `R2B`
+- `dependencyIds` is an array with **2 GUIDs** (one per FS dependency: R1A1→R1A2, R1B1→R2A1)
 
-Save `taskRefs.L6` as `LEAF_TASK_ID`. Save all 7 IDs as `CREATED_TASK_IDS`. Save `dependencyIds` as `CREATED_DEP_IDS`.
+Save all 10 task IDs as `CREATED_TASK_IDS`. Save `dependencyIds` (2 GUIDs) as `CREATED_DEP_IDS`.
+Save `taskRefs.R1A` as `VERIFY_TASK_R1A`. Save `taskRefs.R2A1` as `VERIFY_TASK_R2A1`.
 
-> `dependencyIds` contains the `msdyn_projecttaskdependencyid` GUIDs for any dependency entities
-> created alongside the tasks. PSS requires these to be deleted **before** the task entities that
-> reference them — omitting them from the cleanup causes `E_INVALIDENTITYUID` on the first task
-> that has a dependency (SIB, at index 1 in the leaves-first batch).
+---
 
 ### Step 2.5 — apply_changes
 
 Call: `apply_changes` with `{ "operationSetId": "<OP_SET_1>" }`
 
-**Pass criteria:**
-- `ok` is `true`
+**Pass criteria:** `ok: true`.
+
+---
 
 ### Step 2.6 — poll for completion
 
-Call: `check_change_session_status` with no arguments (list mode).
+Call `check_change_session_status` (no args). Repeat up to 10 × 3 s until `openSets` is empty.
 
-Repeat up to 10 times (wait ~3 seconds between calls) until `openSets` is an empty array or the
-session from Step 2.3 disappears from the list.
+**Pass criteria:** `openSets` empties within the budget.
 
-**Pass criteria:**
-- Eventually `openSets` length = 0 (or the specific session is gone)
-- If still open after 10 polls: record as FAIL with "operation did not complete in time"
+> **Persistence lag:** wait an additional ~5–10 s after openSets clears before Step 2.7.
 
-> **Persistence lag is normal.** The OperationSet often disappears from `openSets`
-> *before* the tasks are queryable — observed gaps of ~15-20s between `apply_changes`
-> returning `ok: true` and `get_plan_tasks_and_buckets` showing the new rows. An empty
-> `openSets` means "the write was accepted", **not** "the data is readable yet". Do not
-> treat a `taskCount: 0` immediately after apply as a failure; let Step 2.7 retry.
+---
 
-### Step 2.7 — verify via get_plan_tasks_and_buckets
+### Step 2.7 — verify task creation
 
-After `openSets` is empty, wait ~5 seconds, then call `get_plan_tasks_and_buckets` with
-`{ "projectId": "<NEW_PROJECT_ID>" }`. **Retry the verify** up to 6 times with ~5 seconds
-between attempts until `taskCount` reaches 7 (to absorb the persistence lag noted above).
+**Step 2.7a — bulk count.** Call `get_plan_tasks_and_buckets` with `{ "projectId": "<NEW_PROJECT_ID>" }`.
+Retry up to 6 × 5 s until `taskCount` reaches 10.
 
 **Pass criteria:**
-- `taskCount` = 7 (the 7 tasks created in Step 2.4) — reached within the retry budget
-- All 7 task IDs from Step 2.4 appear in the returned `tasks` array
-- `summaryTaskIds` contains at least `L1` (root has children so it is a summary task)
-- Only record FAIL if `taskCount` is still < 7 after all 6 retries (note how many tasks
-  did appear and after how long).
+- `taskCount` = 10
+- `summaryTaskIds` includes at least `R1`, `R1A`, `R1B`, `R2`, `R2A` (all 5 parents)
 
-Save the returned `summaryTaskIds` array as `SUMMARY_IDS`.
+Save `summaryTaskIds` as `SUMMARY_IDS`.
 
-### Step 2.8 — update_tasks (rename L6 + progress; milestone is ignored by design)
+**Step 2.7b — attribute verification on R1A.** Call `get_task` with `{ "taskId": "<VERIFY_TASK_R1A>" }`.
 
-> **Milestone cannot be set through the API.** Planner Premium's scheduling engine
-> rejects `msdyn_ismilestone` on update with `ScheduleAPI-AV-0002` (it also rejects it
-> on create and auto-sets it on summary tasks). The server therefore **drops** the
-> `milestone` field and returns a warning rather than failing the batch. This step
-> sends `milestone: true` on purpose to confirm that graceful-ignore behaviour — the
-> rename and progress still apply.
+**Pass criteria — check every attribute set in Step 2.4:**
+- `task.subject` is `"Stakeholder Alignment"`
+- `task.bucketName` is `"Planning"` — bucket name resolved correctly
+- `task.effortHours` is `16`
+- `task.description` is `"Align all key stakeholders before kick-off"`
+- `task.priority` is `2`
+- `task.start` contains `"2026-09-01"` (may include time component)
+- `task.finish` contains `"2026-09-05"`
+- `task.isSummary` is `true` (R1A has children R1A1 and R1A2)
+- `task.parentTaskSubject` is `"Programme Kick-off"` — parent name resolved
 
-Open a second change session first:
+**Step 2.7c — dependency verification on R2A1.** Call `get_task` with `{ "taskId": "<VERIFY_TASK_R2A1>" }`.
 
-Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E update" }`
+**Pass criteria:**
+- `task.subject` is `"Core Feature Build"`
+- `task.bucketName` is `"Development"`
+- `task.effortHours` is `32`
+- `task.description` is `"Primary deliverable — core feature implementation"`
+- `task.isSummary` is `false` (leaf task)
+- `predecessors` is a non-empty array (R1B1 is a predecessor via FS link)
+- `predecessors[0].predecessorTaskId` matches `taskRefs.R1B1`
+
+**Step 2.7d — list_dependencies.** Call `list_dependencies` with `{ "projectId": "<NEW_PROJECT_ID>" }`.
+
+**Pass criteria:**
+- `count` is 2 (two FS dependencies created)
+- If `warnings` contains "Dependency links unavailable": record as NOTE, not FAIL — this is an environment limitation (the test created the deps correctly; they just can't be queried via REST on this tenant)
+
+---
+
+### Step 2.8 — update_tasks (set progress, rename, confirm milestone-drop)
+
+Open a second change session:
+
+Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E updates" }`
 Save as `OP_SET_2`.
 
-Call: `update_tasks` with:
+Call `update_tasks` with the following — this also tests milestone being silently dropped:
+
 ```json
 {
   "operationSetId": "<OP_SET_2>",
   "projectId": "<NEW_PROJECT_ID>",
   "tasks": [
     {
-      "taskId": "<LEAF_TASK_ID>",
-      "subject": "Level 6 (verified)",
+      "taskId": "<taskRefs.R1A1>",
+      "subject": "Draft Meeting Agenda (done)",
+      "progressPercent": 100,
+      "description": "Agenda finalised and approved"
+    },
+    {
+      "taskId": "<taskRefs.R1B1>",
       "progressPercent": 50,
       "milestone": true
+    },
+    {
+      "taskId": "<taskRefs.R2B>",
+      "progressPercent": 0,
+      "description": "QA not yet started",
+      "priority": 1
     }
-  ],
-  "summaryTaskIds": <SUMMARY_IDS>
+  ]
 }
 ```
 
 **Pass criteria:**
 - `ok` is `true`
-- `warnings` is a non-empty array containing a message that `milestone` was ignored
-  (e.g. "'milestone' was ignored … set it … in the Planner UI")
-- **FAIL** if the call errors out, or if `warnings` is empty/absent (the milestone
-  field must be dropped with a warning, never silently accepted or sent to PSS)
+- `warnings` is a non-empty array mentioning that `milestone` was ignored on R1B1
+- **FAIL** if `warnings` is absent (milestone must be dropped with a warning)
 
-> `projectId` is included so the server auto-fetches the task hierarchy and protects
-> summary tasks without needing the explicit `summaryTaskIds`. Both are passed here
-> as belt-and-suspenders — either alone is sufficient for the guard to fire.
+---
 
 ### Step 2.9 — apply update session
 
 Call: `apply_changes` with `{ "operationSetId": "<OP_SET_2>" }`
 
+**Pass criteria:** `ok: true`. Wait ~10 s before verifying.
+
+---
+
+### Step 2.10 — verify updates
+
+**Step 2.10a — R1A1 rename + progress + description.** Call `get_task` with `{ "taskId": "<taskRefs.R1A1>" }`.
+
 **Pass criteria:**
-- `ok` is `true`
+- `task.subject` is `"Draft Meeting Agenda (done)"`
+- `task.progressPercent` is `100`
+- `task.description` is `"Agenda finalised and approved"`
+- `task.isMilestone` is `false` (leaf, not a summary, milestone not settable via API)
 
-### Step 2.10 — verify update via get_task
-
-Call: `get_task` with `{ "taskId": "<LEAF_TASK_ID>" }`
+**Step 2.10b — R1B1 progress + milestone ignored.** Call `get_task` with `{ "taskId": "<taskRefs.R1B1>" }`.
 
 **Pass criteria:**
-- `task.subject` is `"Level 6 (verified)"` — the rename was applied
-- `task.progressPercent` is 50 — the progress update was applied
-- `task.isMilestone` is `false` — L6 is a leaf and milestone was (correctly) NOT set
-  via the API. (Treat `true` here as a FAIL: it would mean the milestone field leaked
-  through despite the Step 2.8 contract. A summary/parent task could legitimately show
-  `true` because PSS auto-flags those, but L6 is a leaf.)
+- `task.progressPercent` is `50`
+- `task.isMilestone` is `false` (PSS manages this flag; it cannot be set via API)
 
-### Step 2.11 — cleanup (delete test tasks)
+**Step 2.10c — R2B description + priority.** Call `get_task` with `{ "taskId": "<taskRefs.R2B>" }`.
 
-Open a cleanup change session:
-Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "Cleanup" }`
+**Pass criteria:**
+- `task.progressPercent` is `0`
+- `task.description` is `"QA not yet started"`
+- `task.priority` is `1`
+
+---
+
+### Step 2.11 — cleanup (delete all tasks and dependency entities)
+
+Open cleanup session:
+
+```json
+{ "projectId": "<NEW_PROJECT_ID>", "description": "Cleanup" }
+```
 Save as `OP_SET_CLEAN`.
 
-Call: `delete_tasks_batch` with:
+Call `delete_tasks_batch`:
+
 ```json
 {
   "operationSetId": "<OP_SET_CLEAN>",
   "projectId": "<NEW_PROJECT_ID>",
   "taskIds": <CREATED_TASK_IDS>,
   "records": [
-    { "entityLogicalName": "msdyn_projecttaskdependency", "recordId": "<CREATED_DEP_IDS[0]>" }
+    { "entityLogicalName": "msdyn_projecttaskdependency", "recordId": "<CREATED_DEP_IDS[0]>" },
+    { "entityLogicalName": "msdyn_projecttaskdependency", "recordId": "<CREATED_DEP_IDS[1]>" }
   ],
   "confirmed": true
 }
 ```
 
-> If `CREATED_DEP_IDS` is empty (no dependencies were created), omit the `records` field.
-> The dependency record must be in `records` because `taskIds` only expands to task entities.
-> The ordering is: dependency records are sent first (before the auto-sorted task deletes).
-
 Call: `apply_changes` with `{ "operationSetId": "<OP_SET_CLEAN>" }`
 
 **Pass criteria:**
-- Both calls return `ok: true`
-- Note to user: the test plan `ZZ-MCP-TEST-<date>` cannot be deleted via the API — **remove it
-  manually in the Planner UI.**
+- Both `delete_tasks_batch` and `apply_changes` return `ok: true`
 
-> `projectId` enables automatic leaves-first ordering: the server fetches the task
-> hierarchy and sorts children before parents so PSS doesn't return `E_INVALIDENTITYUID`
-> mid-batch. Always pass it when deleting a hierarchy of tasks.
+> **Dependency records must come first** in `records` — PSS rejects task deletion if a dependency
+> entity still references it (`E_INVALIDENTITYUID`). `projectId` also triggers auto-sort so tasks
+> are deleted leaves-first automatically.
+
+**Verify cleanup:** Call `get_plan_tasks_and_buckets` with `{ "projectId": "<NEW_PROJECT_ID>" }`. Retry up to 3 × 5 s.
+
+**Pass criteria:** `taskCount` = 0 (or only Bucket 1 default remains, no tasks).
+
+**Residue:** The plan `ZZ-MCP-TEST-<date>` (and its 3 buckets) remains — remove manually in Planner UI.
 
 ---
 
@@ -617,23 +725,30 @@ everything.
 
 ## Phase 2 — Write Lifecycle
 
-[If skipped, write: "⏭️ Skipped — write mode was not enabled."]
+[If skipped, write: "⏭️ Skipped — write mode not selected or not enabled."]
 
 | # | Step | Tool | Result | Notes |
 |---|---|---|---|---|
 | 2.1 | create_plan | `create_plan` | [✅/❌] | projectId=[value] |
-| 2.2 | add_bucket (PSS, async) | `add_bucket` | [✅/❌] | bucketId=[value], note=[persisted\|queued] |
+| 2.2a | add_bucket: Planning | `add_bucket` | [✅/❌] | bucketId=[value], note=[persisted\|queued] |
+| 2.2b | add_bucket: Development | `add_bucket` | [✅/❌] | bucketId=[value] |
+| 2.2c | add_bucket: Testing | `add_bucket` | [✅/❌] | bucketId=[value] |
 | 2.3 | start_change_session | `start_change_session` | [✅/❌] | operationSetId=[value] |
-| 2.4 | add_tasks (7 tasks, 6 levels) | `add_tasks` | [✅/❌] | taskRefs=[L1..L6,SIB] |
+| 2.4 | add_tasks (10 tasks, 3 buckets, 2 deps) | `add_tasks` | [✅/❌] | taskRefs=[R1..R2B], depIds=2 |
 | 2.5 | apply_changes | `apply_changes` | [✅/❌] | — |
 | 2.6 | poll for completion | `check_change_session_status` | [✅/❌] | [N] polls needed |
-| 2.7 | verify task count | `get_plan_tasks_and_buckets` | [✅/❌] | taskCount=[N] (expected 7) |
-| 2.8 | update_tasks (rename+progress; milestone ignored) | `update_tasks` | [✅/❌] | L6 → "verified", 50%; milestone warning present=[bool] |
+| 2.7a | verify task count | `get_plan_tasks_and_buckets` | [✅/❌] | taskCount=10, summaryIds=[N] |
+| 2.7b | verify R1A attributes | `get_task` | [✅/❌] | bucketName=Planning, effortHours=16, isSummary=true, parentSubject correct |
+| 2.7c | verify R2A1 dependency | `get_task` | [✅/❌] | predecessors=[R1B1], description correct |
+| 2.7d | verify dependencies | `list_dependencies` | [✅/❌/⏭️NOTE] | count=2 or env-limitation note |
+| 2.8 | update_tasks (progress+desc; milestone drop) | `update_tasks` | [✅/❌] | warnings=[milestone ignored] |
 | 2.9 | apply update session | `apply_changes` | [✅/❌] | — |
-| 2.10 | verify update | `get_task` | [✅/❌] | subject=[value], progress=50, isMilestone=false (leaf) |
-| 2.11 | cleanup (delete tasks) | `delete_tasks_batch` | [✅/❌] | [N] tasks deleted |
+| 2.10a | verify R1A1 update | `get_task` | [✅/❌] | subject=done, progress=100, desc updated |
+| 2.10b | verify R1B1 update | `get_task` | [✅/❌] | progress=50, isMilestone=false |
+| 2.10c | verify R2B update | `get_task` | [✅/❌] | desc set, priority=1 |
+| 2.11 | cleanup (10 tasks + 2 dep entities) | `delete_tasks_batch` | [✅/❌] | taskCount=0 after verify |
 
-**Residue:** Test plan `ZZ-MCP-TEST-<date>` (id: [projectId]) remains in Planner — remove manually.
+**Residue:** Plan `ZZ-MCP-TEST-<date>` (id: [projectId]) remains — 3 buckets + plan need manual removal in Planner UI.
 
 ---
 
