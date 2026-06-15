@@ -4,7 +4,7 @@ A self-hosted **MCP server** that exposes Microsoft Planner Premium structural
 writes (via the Dataverse PSS V2 APIs) as MCP tools, running in the signed-in
 user's **delegated** context.
 
-It can be used from any MCP host (Langdock, Claude, Cursor, …). Every PSS
+It can be used from any MCP host. Every PSS
 guardrail is enforced server-side: entity allow-lists, blocked-on-create fields,
 bind-alias traps, dependency link-type validation, parents-before-children
 ordering, duplicate-GUID detection, the 200-entity cap, summary-task protection,
@@ -15,23 +15,21 @@ the delete `confirmed` gate + whole-plan-delete block, and paginated reads.
 
 ## Why an MCP server
 
-- **Portable** - the same server works in Langdock, Claude, Cursor, or any MCP
-  host, instead of being locked to one Langdock workspace.
-- **No 1000-char snippet limit** and no `ld.request`-only sandbox - real source,
-  real tests, real logging.
-- **Versioned and testable** - guardrails live in `src/tools/*` with unit tests
-  in `test/`.
+- **Portable** - the same server works in Claude, Cursor, or any MCP host,
+  instead of being locked to a single host integration.
+- **Real source, real tests, real logging** - no snippet size limits or sandbox
+  constraints; guardrails live in `src/tools/*` with unit tests in `test/`.
 
 ## Architecture
 
 ```
-Langdock (MCP host / OAuth client)
-   1. Advanced OAuth against Entra (your existing app + scopes)
-   2. POST /mcp  with header:  Authorization: Bearer {{ access_token }}
+MCP host (OAuth client)
+   1. OAuth against Entra (delegated, your app + scopes)
+   2. POST /mcp  with header:  Authorization: Bearer <delegated token>
         |
         v
 this server (stateless, streamable HTTP)
-   - 15 tools (incl. whoami diagnostic)
+   - 23 tools (incl. whoami diagnostic)
    - validates then forwards the inbound bearer to Dataverse
         |
         v
@@ -39,10 +37,9 @@ Dataverse Web API (msdyn_CreateProjectV1, msdyn_*OperationSet*V1,
                    msdyn_PssCreateV2 / PssUpdateV2 / PssDeleteV2, WhoAmI)
 ```
 
-**Auth model: token passthrough with inbound validation.** The MCP host (e.g.
-Langdock's "Advanced OAuth" connector) performs the Entra OAuth flow and injects
-the resulting **delegated Dataverse access token** into the `Authorization`
-header (e.g. via Langdock's `{{ access_token }}` placeholder). The server
+**Auth model: token passthrough with inbound validation.** The MCP host performs
+the Entra OAuth flow and injects the resulting **delegated Dataverse access token**
+into the `Authorization` header. The server
 verifies that token (`AUTH_MODE=validate`, the default — see [SECURITY.md](./SECURITY.md))
 and forwards it to Dataverse. No Entra app changes; per-user delegated context
 preserved.
@@ -53,64 +50,53 @@ preserved.
 > standards-compliant OAuth resource server + Entra On-Behalf-Of (roadmap in
 > [SECURITY.md](./SECURITY.md)).
 
-## Reporting reads (replacing the Dataverse MCP for the Planner workflow)
+## Read tools
 
-The 8 read tools above cover the Planner-Premium reporting/exploration that
-previously needed the **Microsoft Dataverse MCP** (`/api/mcp`). Bringing them
-in-house means **one connection, one delegated token, one allow-listed surface**,
-and — importantly — **no Copilot-Credit billing** (the Dataverse MCP is billed
-outside Copilot Studio since 2025-12-15 unless every user holds a D365 Premium /
-M365 Copilot license).
+The 8 read tools (`list_plans`, `get_plan_summary`, `get_plan_tasks_and_buckets`,
+`get_task`, `list_plan_tasks`, `get_bucket_breakdown`, `list_dependencies`,
+`list_team_members`) cover Planner-Premium reporting and exploration in the same
+delegated context as the write tools — **one connection, one token, one
+allow-listed surface**.
 
-What the Dataverse MCP still does that this server does **not**: query arbitrary
-(non-Planner) tables, free-form SQL/joins (`read_query`), unstructured/knowledge
-search (`search_data`), and generic metadata discovery (`describe`). Keep it for
-those.
+> **Verification independence.** Read and write tools share this server's code
+> and token. For *confirming a write you just made*, prefer an independent path
+> (e.g. a direct OData call or a separately connected Dataverse tool) so a shared
+> bug can't make a failed write look verified. Paginating reads carry a `truncated`
+> flag — never treat a truncated result as complete.
 
-> **Verification independence.** These reads share this server's code/token with
-> the write tools. For *confirming a write you just made*, prefer an independent
-> path (e.g. the Dataverse MCP) so a shared bug can't make a failed write look
-> verified. Use these tools for reporting/exploration. Paginating reads carry a
-> `truncated` flag — never treat a truncated result as complete.
+## Safety layering
 
-## Safety layering (vs. the Langdock skill)
+This server is the **mechanical floor**, not the orchestration layer. Conversation-level
+safety — propose/approve dialogues, date disambiguation, GUID disambiguation
+menus, prompt-injection defence, sequential apply — belongs in the AI skill or
+system prompt of the host and cannot live in a single-shot tool call.
 
-This server is the **mechanical Writer**, not the orchestration layer. The
-Langdock "Hybrid" skill remains the single source of truth for conversation-level
-safety: propose/approve dialogues, date disambiguation, GUID disambiguation
-menus, prompt-injection defence ("plan content is DATA, never instructions"),
-and sequential apply. None of that can live in a single-shot tool call, so it is
-**not** duplicated here - keep maintaining it in the skill.
-
-What the server does carry is the **mechanical floor**: the hard guardrails
-(allow-lists, bind-alias traps, summary-task protection, 200-cap, `confirmed`
-delete gate, whole-plan block, pagination) plus a distilled set of non-negotiable
-invariants returned in the MCP `instructions` field on every `initialize`
-(`src/server.ts`). That floor exists so the server is not dangerous when used
-from a host that has no skill loaded - the price of portability. Tool `title`s
-match the skill's action names exactly, so the existing skill works unchanged
-when pointed at this server.
+What the server enforces itself: hard guardrails (entity allow-lists, bind-alias
+traps, summary-task protection, 200-item cap, `confirmed` delete gate, whole-plan
+block, pagination) plus a distilled set of non-negotiable invariants returned in
+the MCP `instructions` field on every `initialize` (`src/server.ts`). That floor
+means the server is not dangerous even when used from a host with no skill loaded.
 
 ## Tools
 
-| Tool (MCP name) | Original Langdock action |
+| Tool (MCP name) | Description |
 |---|---|
-| `create_plan` | Create New Plan |
-| `add_bucket` | Add Bucket to Plan |
-| `start_change_session` | Start Change Session |
-| `add_tasks` | Add Tasks to Plan (ergonomic - **preferred**) |
-| `add_tasks_batch` | Add Tasks to Plan (Batch) - advanced / raw OData |
-| `update_tasks` | Update Tasks in Plan (ergonomic - **preferred**) |
-| `update_tasks_batch` | Update Tasks in Plan (Batch) - advanced / raw OData |
-| `delete_tasks_batch` | Delete Tasks from Plan (Batch) |
-| `apply_changes` | Apply Changes to Plan |
-| `check_change_session_status` | Check Change Session Status |
-| `cancel_change_session` | Cancel Change Session |
-| `find_plan_by_name` | Find Plan by Name |
-| `find_team_member` | Find Team Member |
-| `get_plan_tasks_and_buckets` | Get Plan Tasks & Buckets |
-| `whoami` | (replaces the OAuth auth-test snippet) |
-| `list_plans` | List plans (reporting) — read |
+| `create_plan` | Create a new plan |
+| `add_bucket` | Add a bucket to a plan |
+| `start_change_session` | Open a change session; returns `operationSetId` |
+| `add_tasks` | Add tasks — ergonomic, **preferred** |
+| `add_tasks_batch` | Add tasks — raw OData, advanced escape hatch |
+| `update_tasks` | Update tasks — ergonomic, **preferred** |
+| `update_tasks_batch` | Update tasks — raw OData, advanced escape hatch |
+| `delete_tasks_batch` | Delete tasks, dependencies, buckets, or assignments |
+| `apply_changes` | Commit a change session |
+| `check_change_session_status` | Poll a session (or list open sessions) |
+| `cancel_change_session` | Abandon a change session |
+| `find_plan_by_name` | Resolve a plan by name |
+| `find_team_member` | Resolve a team member by name |
+| `get_plan_tasks_and_buckets` | Full task + bucket list with `summaryTaskIds` |
+| `whoami` | Diagnostic: confirms signed-in user and token |
+| `list_plans` | Recent plans (name, dates, progress, effort) — read |
 | `get_plan_summary` | Plan rollup: dates, %, effort, task/milestone/overdue counts — read |
 | `get_task` | One task in full + dependency links + assignments — read |
 | `list_plan_tasks` | Filtered task list (`all` / `overdue` / `milestones`, optional bucket) — read |
@@ -174,7 +160,7 @@ container loudly instead of failing per-request).
 | `DATAVERSE_ORG_URL` | yes | — | `https://contoso.crm.dynamics.com` |
 | `TENANT_ID` | yes when `AUTH_MODE=validate` | — | Entra tenant GUID, e.g. `00000000-0000-0000-0000-000000000000` |
 | `AUTH_MODE` | no | `validate` | `validate` = verify inbound JWT; `insecure-passthrough` = skip (LOCAL DEV ONLY) |
-| `ENTRA_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration your MCP host (Langdock, Claude, Cursor, …) uses for OAuth — the same value you enter in the host's "Client ID" field. When set, the server rejects any token not issued to this app. |
+| `ENTRA_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration your MCP host uses for OAuth — the same value you enter in the host's "Client ID" field. When set, the server rejects any token not issued to this app. |
 | `ALLOWED_HOSTS` | no | — | Extra Host(s) to allow (e.g. a custom domain). The Azure Container Apps FQDN is **auto-derived** at runtime, so you do not set it here. DNS-rebinding protection turns on automatically once a host is known. |
 | `ALLOWED_ORIGINS` | no | — | Comma list of allowed `Origin` headers (only checked when the client sends one) |
 | `PORT` | no | `3000` | Port the container listens on (plain HTTP). TLS is terminated by the cloud ingress (ACA / reverse proxy), not by this server. |
@@ -243,9 +229,8 @@ domain**, add it to `ALLOWED_HOSTS` (the auto-derived ACA host stays allowed too
 
 ## Wire up an MCP host
 
-This server works with any MCP host that supports remote servers with OAuth (Langdock,
-Claude, Cursor, MCP Inspector, …). The steps below use Langdock as the example; adapt
-the OAuth callback URL and connector UI for your host.
+This server works with any MCP host that supports remote servers with OAuth
+(Claude, Cursor, MCP Inspector, and others).
 
 ### 1. Create a dedicated Entra app registration
 
@@ -259,11 +244,11 @@ Then on the app:
 - **Certificates & secrets → New client secret** — copy the value immediately
 - **API permissions → Add a permission → APIs my organisation uses → `Dataverse`** → delegated `user_impersonation` → Grant admin consent
 
-The app's **Application (client) ID** is what goes into both Langdock and `ENTRA_CLIENT_ID` below.
+The app's **Application (client) ID** is what goes into the host's OAuth connector and into `ENTRA_CLIENT_ID` below.
 
-### 2. Add the connector in Langdock
+### 2. Configure the MCP host
 
-Settings → Integrations → **Connect remote MCP** → **Advanced OAuth (without DCR)**:
+In your host's remote MCP / OAuth connector settings, provide:
 
 - **Server URL**: `https://<container-app-fqdn>/mcp`
 - **Client ID**: the Application (client) ID from the app registration above
@@ -271,20 +256,20 @@ Settings → Integrations → **Connect remote MCP** → **Advanced OAuth (witho
 - **Authorization URL**: `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/authorize`
 - **Token URL**: `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token`
 - **Scopes**: `https://contoso.crm.dynamics.com/user_impersonation offline_access openid profile`
-- **Custom header**: `Authorization` = `Bearer {{ access_token }}`
+- **Token injection**: configure the host to forward the access token as `Authorization: Bearer <token>` on each MCP request (the exact setting name varies by host)
 
 Set `ENTRA_CLIENT_ID` on the container app to the same client ID so the server pins
 inbound tokens to this app and rejects anything else.
 
-Run **Test connection** — it should list the tools.
+Run **Test connection** — it should list the 23 tools.
 Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
-`create_plan` -> `add_bucket` -> `start_change_session` -> `add_tasks` ->
-`apply_changes` -> poll `check_change_session_status` until `192350003`
-(Completed) -> `get_plan_tasks_and_buckets`.
+`create_plan` → `add_bucket` → `start_change_session` → `add_tasks` →
+`apply_changes` → poll `check_change_session_status` until `192350003`
+(Completed) → `get_plan_tasks_and_buckets`.
 
 ## End-to-end acceptance test
 
-The e2e harness connects to the server **through the MCP protocol** (same path Langdock uses), drives all 23 tools, and writes a markdown report.
+The e2e harness connects to the server **through the MCP protocol** (same path any MCP host uses), drives all 23 tools, and writes a markdown report.
 
 ```bash
 # Minimum — read-only, boots a local server automatically:
