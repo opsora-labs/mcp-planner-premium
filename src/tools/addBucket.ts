@@ -82,9 +82,9 @@ export const addBucket: ToolDef = {
       );
     }
 
-    // 4. Poll for completion (up to 10 × 3 s = 30 s).
+    // 4. Poll operationset status (up to 15 × 3 s = 45 s).
     let completed = false;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 15; i++) {
       await sleep(3000);
       const statusRes = await dvReq(
         {
@@ -107,6 +107,26 @@ export const addBucket: ToolDef = {
         );
       if (code === 192350004)
         throw new Error("add_bucket PSS operation was abandoned (operationSetId: " + operationSetId + ").");
+    }
+
+    // 5. Ground-truth verification: if the poll timed out or the operationset status
+    // was inconclusive, check whether the bucket is directly queryable in Dataverse.
+    // PSS persistence and queryability can lag slightly behind operationset completion,
+    // but this catches the case where the poll window expired before the status flipped.
+    if (!completed) {
+      try {
+        const verifyRes = await dvReq(
+          {
+            url: BASE + "/msdyn_projectbuckets(" + bucketId + ")?$select=msdyn_projectbucketid",
+            method: "GET",
+            headers: dvHeaders(),
+          },
+          { retry: true },
+        );
+        if (verifyRes.status < 400) completed = true;
+      } catch {
+        // Non-fatal — leave completed as false and return the operationSetId.
+      }
     }
 
     return {

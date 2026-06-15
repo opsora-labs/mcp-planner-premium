@@ -42,7 +42,8 @@ export interface SimpleDependency {
 export interface SimpleTask {
   ref: string;
   subject: string;
-  bucket: string; // bucket name or bucketId GUID
+  bucket?: string;   // bucket name or bucketId GUID (use this OR bucketId)
+  bucketId?: string; // alias for bucket when passing a GUID directly
   start?: string;
   finish?: string;
   effortHours?: number;
@@ -126,8 +127,11 @@ export function buildTaskEntities(
     seen.add(t.ref);
     if (!t.subject || !t.subject.trim())
       throw new Error("Task '" + t.ref + "': subject is required.");
-    if (!t.bucket || !t.bucket.trim())
-      throw new Error("Task '" + t.ref + "': bucket is required (name or GUID).");
+    // Accept either 'bucket' (name or GUID) or 'bucketId' (GUID alias).
+    if (!(t.bucket || t.bucketId || "").trim())
+      throw new Error(
+        "Task '" + t.ref + "': 'bucket' is required — pass the bucket name (e.g. \"Sprint 1\") or a bucketId GUID via the 'bucket' field.",
+      );
   }
 
   const refToId: Record<string, string> = {};
@@ -161,7 +165,7 @@ export function buildTaskEntities(
       msdyn_subject: t.subject,
       "msdyn_project@odata.bind": "/msdyn_projects(" + projectId + ")",
       "msdyn_projectbucket@odata.bind":
-        "/msdyn_projectbuckets(" + resolveBucketId(t.bucket) + ")",
+        "/msdyn_projectbuckets(" + resolveBucketId(t.bucket || t.bucketId || "") + ")",
     };
     if (t.start) ent.msdyn_start = t.start;
     if (t.finish) ent.msdyn_finish = t.finish;
@@ -244,7 +248,12 @@ const taskSchema = z.object({
   subject: z.string().describe("Task name."),
   bucket: z
     .string()
-    .describe("Bucket NAME (resolved against the plan) or a bucketId GUID."),
+    .optional()
+    .describe("Bucket NAME (resolved against the plan) or a bucketId GUID. Use this OR 'bucketId', not both."),
+  bucketId: z
+    .string()
+    .optional()
+    .describe("Alias for 'bucket' when passing a GUID directly — avoids bucket-name lookup. Use the GUID returned by add_bucket here."),
   start: z.string().optional().describe("ISO start date, e.g. 2026-07-01."),
   finish: z.string().optional().describe("ISO finish date, e.g. 2026-07-05."),
   effortHours: z.number().optional().describe("Effort in hours."),
@@ -294,6 +303,12 @@ export const addTasksSimple: ToolDef = {
 
     const tasks = asArray<SimpleTask>(input.tasks, "tasks");
     if (tasks.length === 0) throw new Error("tasks must be a non-empty array.");
+
+    // Normalise: coerce 'bucketId' alias into 'bucket' so the rest of the pipeline
+    // only needs to handle one field. A GUID in 'bucketId' bypasses name lookup.
+    for (const t of tasks) {
+      if (!t.bucket && t.bucketId) t.bucket = t.bucketId;
+    }
 
     // Resolve bucket names -> bucketIds with a single read (skip if all GUIDs).
     const wantedNames = new Set<string>();

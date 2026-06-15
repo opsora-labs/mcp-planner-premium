@@ -77,6 +77,18 @@ describe("buildTaskEntities", () => {
     expect(() => validateAddEntities(built.entities)).not.toThrow();
   });
 
+  it("accepts bucketId as an alias for bucket (GUID bypass)", () => {
+    const built = buildTaskEntities(
+      PROJECT,
+      [{ ref: "t1", subject: "X", bucketId: BUCKET }],
+      resolve,
+    );
+    expect(built.entities[0]["msdyn_projectbucket@odata.bind"]).toBe(
+      "/msdyn_projectbuckets(" + BUCKET + ")",
+    );
+    expect(() => validateAddEntities(built.entities)).not.toThrow();
+  });
+
   it("accepts an existing task GUID as parent", () => {
     const existing = "99999999-8888-7777-6666-555555555555";
     const built = buildTaskEntities(
@@ -201,6 +213,6 @@ describe("buildTaskEntities", () => {
     ).toThrow(/subject is required/);
     expect(() =>
       buildTaskEntities(PROJECT, [{ ref: "t1", subject: "A", bucket: "" }], resolve),
-    ).toThrow(/bucket is required/);
+    ).toThrow(/'bucket' is required/);
   });
 });
