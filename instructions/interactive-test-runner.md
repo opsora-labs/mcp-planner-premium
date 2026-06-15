@@ -64,7 +64,7 @@ Call: `whoami` (no arguments)
 **Pass criteria:**
 - `ok` is `true`
 - `userId` is a non-empty string (looks like a GUID)
-- `userEmail` or `userName` is present
+- `userEmail` or `userName` is present *(optional — some tenants return only `userId`, `businessUnitId`, `organizationId`; record as PASS with a NOTE if identity display fields are absent)*
 
 Record the `userId` — you will reference it in the report.
 
@@ -125,11 +125,22 @@ Call: `get_task` with `{ "taskId": "<TEST_TASK_ID>" }`
 **Pass criteria:**
 - `ok` is `true`
 - `task.taskId` matches the input
+- `task.description` is present (string or null)
+- `task.bucketName` is present (string or null — resolved via `$expand`)
+- `task.parentTaskSubject` is present (string or null — resolved via `$expand`)
+- `task.displaySequence` is present (number or null)
+- `task.sprintId` is present (string or null)
+- `task.effortHours` is present (number or null)
+- `task.outlineLevel` is present (number or null)
+- `task.progressPercent` (if not null) is between 0 and 100
 - `predecessors` is an array
 - `successors` is an array
-- `assignments` is an array
+- `assignments` is an array (each entry has `teamMemberId` and `name`)
 - `warnings` is an array (degrade path — OK to be empty)
-- `task.progressPercent` (if not null) is between 0 and 100
+
+> **Extended fields** (`actualStart`, `actualFinish`, `remainingEffortHours`, `durationHours`)
+> are only present on Project Operations tenants. On basic Planner Premium they are absent
+> from the response — this is correct behaviour, not a FAIL.
 
 ### Step 1.6 — list_plan_tasks (three filters)
 
@@ -145,6 +156,10 @@ Call `list_plan_tasks` three times with `{ "projectId": "<TEST_PROJECT_ID>", "fi
 - `tasks` is an array
 - `filter` echoes back the input value
 - `truncated` is a boolean
+- If tasks exist, each task has: `taskId`, `subject`, `description`, `start`, `finish`,
+  `progressPercent`, `effortHours`, `outlineLevel`, `displaySequence`, `priority`,
+  `isMilestone`, `isSummary`, `bucketId`, `bucketName`, `parentTaskId`,
+  `parentTaskSubject`, `sprintId`
 
 ### Step 1.7 — get_bucket_breakdown
 
@@ -190,14 +205,12 @@ Call: `describe_option_set` with:
   **Record its `value`.**
 
 > **The FS numeric value is environment-dependent — do not hard-fail on a specific
-> number.** Most tenants use `192350000` for Finish-to-Start, but some (observed on a
-> CRM4/EU environment) expose the link types as small integers `0-3`. This tool faithfully
-> echoes the tenant's metadata, so either is correct *for that tenant*. Record the FS value
-> you actually got and flag a NOTE (not a FAIL) if it is **not** `192350000`, because the
-> server's hard-coded link-type constants (`LINK_TYPE_VALUES` / `LINK_TYPE_LABELS`,
-> `192350000`-style) would then be wrong for that environment and dependencies could be
-> created with the wrong link type. Only record FAIL if no Finish-to-Start option appears
-> at all.
+> number.** Most tenants use `192350000` for Finish-to-Start; EU/CRM4 tenants use `1`.
+> The server's `DATAVERSE_LINK_TYPE_STYLE` env var (`global` or `eu`) must match what
+> this call returns — if FS value is `1`, the server must be running with
+> `DATAVERSE_LINK_TYPE_STYLE=eu`, otherwise dependencies are created with the wrong link
+> type (`ScheduleAPI-AV-0043`). Flag as NOTE (not FAIL) if the value doesn't match `192350000`;
+> only record FAIL if no Finish-to-Start option appears at all.
 
 ---
 
@@ -233,6 +246,13 @@ Call: `add_bucket` with:
 **Pass criteria:**
 - `ok` is `true`
 - `bucketId` is a non-empty string (GUID)
+- `note` is present (indicates PSS persistence status — the tool now routes through
+  PSS internally and polls for completion, so it may take ~10-30 s)
+
+> `add_bucket` no longer does a direct Dataverse insert. It opens its own PSS
+> OperationSet, queues the bucket, applies, and polls until the session completes.
+> The `note` field will say either "Bucket persisted" or include an `operationSetId`
+> if the poll timed out (rare).
 
 Save `bucketId` as `NEW_BUCKET_ID`.
 
@@ -333,6 +353,7 @@ Call: `update_tasks` with:
 ```json
 {
   "operationSetId": "<OP_SET_2>",
+  "projectId": "<NEW_PROJECT_ID>",
   "tasks": [
     {
       "taskId": "<LEAF_TASK_ID>",
@@ -351,6 +372,10 @@ Call: `update_tasks` with:
   (e.g. "'milestone' was ignored … set it … in the Planner UI")
 - **FAIL** if the call errors out, or if `warnings` is empty/absent (the milestone
   field must be dropped with a warning, never silently accepted or sent to PSS)
+
+> `projectId` is included so the server auto-fetches the task hierarchy and protects
+> summary tasks without needing the explicit `summaryTaskIds`. Both are passed here
+> as belt-and-suspenders — either alone is sufficient for the guard to fire.
 
 ### Step 2.9 — apply update session
 
@@ -381,6 +406,7 @@ Call: `delete_tasks_batch` with:
 ```json
 {
   "operationSetId": "<OP_SET_CLEAN>",
+  "projectId": "<NEW_PROJECT_ID>",
   "taskIds": <CREATED_TASK_IDS>,
   "confirmed": true
 }
@@ -392,6 +418,10 @@ Call: `apply_changes` with `{ "operationSetId": "<OP_SET_CLEAN>" }`
 - Both calls return `ok: true`
 - Note to user: the test plan `ZZ-MCP-TEST-<date>` cannot be deleted via the API — **remove it
   manually in the Planner UI.**
+
+> `projectId` enables automatic leaves-first ordering: the server fetches the task
+> hierarchy and sorts children before parents so PSS doesn't return `E_INVALIDENTITYUID`
+> mid-batch. Always pass it when deleting a hierarchy of tasks.
 
 ---
 
@@ -560,8 +590,8 @@ everything.
 | 1.2 | find_plan_by_name | `find_plan_by_name` | [✅/❌/⏭️] | [count returned] |
 | 1.3 | get_plan_summary | `get_plan_summary` | [✅/❌/⏭️] | totalTasks=[N], progressPercent=[N] |
 | 1.4 | get_plan_tasks_and_buckets | `get_plan_tasks_and_buckets` | [✅/❌/⏭️] | [N] tasks, [N] buckets |
-| 1.5 | get_task | `get_task` | [✅/❌/⏭️] | isMilestone=[bool] |
-| 1.6a | list_plan_tasks (all) | `list_plan_tasks` | [✅/❌/⏭️] | [N] tasks |
+| 1.5 | get_task | `get_task` | [✅/❌/⏭️] | isMilestone=[bool], bucketName=[str\|null], extended fields=[present\|absent] |
+| 1.6a | list_plan_tasks (all) | `list_plan_tasks` | [✅/❌/⏭️] | [N] tasks, bucketName/parentTaskSubject present=[bool] |
 | 1.6b | list_plan_tasks (overdue) | `list_plan_tasks` | [✅/❌/⏭️] | [N] tasks |
 | 1.6c | list_plan_tasks (milestones) | `list_plan_tasks` | [✅/❌/⏭️] | [N] tasks |
 | 1.7 | get_bucket_breakdown | `get_bucket_breakdown` | [✅/❌/⏭️] | method=[aggregate\|client] |
@@ -578,7 +608,7 @@ everything.
 | # | Step | Tool | Result | Notes |
 |---|---|---|---|---|
 | 2.1 | create_plan | `create_plan` | [✅/❌] | projectId=[value] |
-| 2.2 | add_bucket | `add_bucket` | [✅/❌] | bucketId=[value] |
+| 2.2 | add_bucket (PSS, async) | `add_bucket` | [✅/❌] | bucketId=[value], note=[persisted\|queued] |
 | 2.3 | start_change_session | `start_change_session` | [✅/❌] | operationSetId=[value] |
 | 2.4 | add_tasks (7 tasks, 6 levels) | `add_tasks` | [✅/❌] | taskRefs=[L1..L6,SIB] |
 | 2.5 | apply_changes | `apply_changes` | [✅/❌] | — |
@@ -699,8 +729,10 @@ Key source files:
   test/guardrails.test.ts              unit tests: validateAddEntities, validateUpdateEntities
   test/buildTasks.test.ts              unit tests: buildTaskEntities
   test/buildUpdate.test.ts             unit tests: buildUpdateEntities
+  test/deleteTasks.test.ts             unit tests: buildDeleteEntities, sortTaskIdsLeavesFirst
+  test/listDependencies.test.ts        unit tests: list_dependencies graceful 404 degrade
   test/deepHierarchy.test.ts           unit tests: 6-level hierarchy
-  test/readHelpers.test.ts             unit tests: summariseTasks
+  test/readHelpers.test.ts             unit tests: summariseTasks, linkTypeLabel (dual range)
   test/auth.test.ts                    unit tests: JWT validation
   test/http.test.ts                    unit tests: HTTP layer (supertest)
 ```
