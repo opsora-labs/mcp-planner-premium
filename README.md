@@ -317,6 +317,8 @@ Known gaps and planned improvements. Contributions welcome.
 
 ### Write tools
 
+- **`delete_tasks_batch` — dependency entities must be deleted separately.** PSS rejects deletion of a task that still has a `msdyn_projecttaskdependency` entity referencing it (`E_INVALIDENTITYUID`). `add_tasks` now returns `dependencyIds` so callers can pass the dependency GUIDs in the `records` field of `delete_tasks_batch` before the task IDs. However, this is a caller-burden: if `dependencyIds` are lost or the caller forgets them, cleanup fails. Investigate whether PSS can auto-cascade dependency deletion when a task is deleted, or add an auto-fetch of dependency entities to `delete_tasks_batch` when `projectId` is provided (similar to the hierarchy fetch for leaves-first sorting) so the caller never has to track dependency IDs manually.
+
 - **Task reparenting.** `update_tasks` does not support changing a task's parent (`msdyn_parenttask@odata.bind`). Whether PSS honours a parent change on update is unconfirmed live — needs an e2e test. If supported, add a `parent` field (ref or GUID) to `update_tasks`.
 
 - **Sprint assignment.** Neither `add_tasks` nor `update_tasks` supports assigning a task to a sprint (`msdyn_projectsprint@odata.bind`). Accessible via the raw `add_tasks_batch` / `update_tasks_batch` escape hatches.
