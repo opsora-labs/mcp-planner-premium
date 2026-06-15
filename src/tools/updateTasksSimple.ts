@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, asArray, assertGuid } from "../dataverse.js";
 import { validateUpdateEntities } from "./updateTasks.js";
+import { hasStrippableTagContent } from "./readHelpers.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
@@ -69,6 +70,16 @@ export function buildUpdateEntities(
     if (t.description !== undefined) {
       ent.msdyn_description = t.description;
       changed++;
+      // Dataverse strips tag-like <...> content from descriptions on save.
+      if (hasStrippableTagContent(t.description)) {
+        warnings.push(
+          "tasks[" +
+            i +
+            "] (" +
+            id +
+            "): description contains angle-bracket content (e.g. \"<...>\") that Dataverse strips on save — that text will not be stored. Remove or rephrase the angle brackets if it must be kept.",
+        );
+      }
     }
     if (t.start !== undefined && t.start !== null) {
       ent.msdyn_start = t.start;

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
-import { linkTypeLabel } from "./readHelpers.js";
+import { linkTypeLabel, decodeDataverseText } from "./readHelpers.js";
 import type { ToolDef } from "./types.js";
 
 // One task in full, including its dependency links and resource assignments.
@@ -166,7 +166,7 @@ export const getTask: ToolDef = {
       task: {
         taskId: t.msdyn_projecttaskid,
         subject: t.msdyn_subject,
-        description: t.msdyn_description ?? null,
+        description: decodeDataverseText(t.msdyn_description),
         start: t.msdyn_start ?? null,
         finish: t.msdyn_finish ?? null,
         ...(hasExtended && {

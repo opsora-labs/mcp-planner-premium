@@ -33,6 +33,44 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Decodes the standard HTML entities Dataverse stores in free-text fields like
+ * msdyn_description. Dataverse HTML-encodes those characters on write and the
+ * Planner UI decodes them for display, so we mirror the UI — callers get the
+ * real characters back (`"`, `&`, `'`, `<`, `>`) instead of `&quot;`/`&amp;`/…
+ *
+ * `&amp;` is decoded LAST on purpose: a stored `&amp;lt;` represents the literal
+ * text `&lt;`, so decoding `&amp;` first would wrongly collapse it to `<`. Doing
+ * `&amp;` last yields the correct literal `&lt;`.
+ *
+ * NOTE: this only reverses entity-encoding. Tag-like `<...>` *content* is
+ * stripped by Dataverse before storage and cannot be recovered on read.
+ */
+export function decodeDataverseText(v: string | null | undefined): string | null {
+  if (typeof v !== "string") return null;
+  return v
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * Detects tag-like `<...>` spans in a description/note. Dataverse's HTML
+ * sanitiser STRIPS such content on write (a confirmed example: "follow-up
+ * <2 weeks>" is stored as "follow-up "), so the write tools warn the caller
+ * before the text is silently lost. A lone `<` or `>` is safe — it is
+ * entity-encoded and round-trips — so only a `<...>` pair is flagged. The match
+ * is deliberately broad (e.g. "5 < 10 > 2" matches): anything the sanitiser
+ * could treat as a tag is worth warning about.
+ */
+export function hasStrippableTagContent(v: string | null | undefined): boolean {
+  return typeof v === "string" && /<[^>]*>/.test(v);
+}
+
 export interface RawTask {
   msdyn_projecttaskid: string;
   msdyn_subject?: string;

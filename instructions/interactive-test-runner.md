@@ -537,13 +537,30 @@ Call `update_tasks` (a description-only edit on a leaf needs no projectId — it
 
 Call: `apply_changes` with `{ "operationSetId": "<OP_SET_NOTE>" }`. Wait ~10 s.
 
-**Verify** — call `get_task` with `{ "taskId": "<taskRefs.R2A1>" }`:
-- `task.description` equals the note **character-for-character**, including the newlines, the
-  euro sign, the accented `é`, and the `"` `&` `<>` `;` `\` characters.
+**Verify** — call `get_task` with `{ "taskId": "<taskRefs.R2A1>" }`. Dataverse sanitises
+descriptions: it HTML-encodes special characters on write and **strips tag-like angle-bracket
+content** before storage. The read tools decode the entities back (to match the Planner UI), so
+the expected returned value is the note with the entities decoded and the `<2 weeks>` token gone:
+
+```
+Meeting notes:
+- Budget approved (€50k) at 50% margin
+- Risks: "vendor lock-in" & data-residency
+- Owner: José; follow-up 
+Path: C:\plans\Q3
+```
+
+- **PASS:** `task.description` preserves the real characters — the `"` quotes, the `&`, the euro
+  sign `€`, the accented `é`, the backslash `\`, the `;` and `:` — as literal characters (NOT as
+  `&quot;`/`&amp;`). The server decodes Dataverse's entity-encoding on read.
+- **Expected loss (not a FAIL):** the `<2 weeks>` angle-bracket content is **stripped by
+  Dataverse** before storage and cannot be recovered — its absence is correct behaviour, documented
+  in `SERVER_INSTRUCTIONS`. Note it, do not fail on it.
+- **FAIL:** if entities come back **un-decoded** (`&quot;` / `&amp;` literally present) — that means
+  the read-side decode (`decodeDataverseText` in `readHelpers.ts`) is not being applied.
 
 > **Line-ending tolerance:** if the only difference is `\r\n` vs `\n` (Dataverse may normalise
-> line endings), record as PASS with a NOTE. A FAIL is any dropped, truncated, double-escaped or
-> substituted character (e.g. `&amp;` instead of `&`, or a missing `€`).
+> line endings), record as PASS with a NOTE.
 
 ---
 
@@ -990,7 +1007,7 @@ everything.
 | 2.10a | verify R1A1 update | `get_task` | [✅/❌] | subject=done, progress=100, desc updated |
 | 2.10b | verify R1B1 update | `get_task` | [✅/❌] | progress=50, isMilestone=false |
 | 2.10c | verify R2B update | `get_task` | [✅/❌] | desc set, priority=1 |
-| 2.11 | note round-trip fidelity | `update_tasks` → `get_task` | [✅/❌] | R2A1 description returns verbatim (multiline/unicode/special chars) |
+| 2.11 | note round-trip fidelity | `update_tasks` → `get_task` | [✅/❌] | R2A1 desc: entities decoded (" & € é \ preserved); `<2 weeks>` stripped by Dataverse (expected) |
 | 2.12 | move bucket + leaf effort change | `update_tasks` | [✅/❌] | R2B bucketName=Planning, effortHours=12 |
 | 2.13 | reparent 2 tasks + change values | `update_tasks` | [✅/❌] | R1A2→Technical Setup, R1B1→Development Sprint, values applied |
 | 2.14 | summary-task protection (negative) | `update_tasks` | [✅ fired / ❌] | rejected on R1 with "roll up"/"summary" |

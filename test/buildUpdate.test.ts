@@ -159,6 +159,23 @@ describe("buildUpdateEntities", () => {
     expect(warnings[0]).toMatch(/un-parenting|parent=null skipped/i);
   });
 
+  it("warns when an updated description contains tag-like <...> content", () => {
+    const { entities, warnings } = buildUpdateEntities([
+      { taskId: ID, description: "ETA <next sprint>" },
+    ]);
+    // The description is still applied; the warning is advisory.
+    expect(entities[0].msdyn_description).toBe("ETA <next sprint>");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/angle-bracket/i);
+  });
+
+  it("does not warn for an updated description with only a lone < or >", () => {
+    const { warnings } = buildUpdateEntities([
+      { taskId: ID, description: "throughput > 5 and latency < 10" },
+    ]);
+    expect(warnings).toHaveLength(0);
+  });
+
   it("the new parent is auto-added to the summary-task guard set (rolled-up writes on it stay blocked)", () => {
     const CHILD = ID;
     const NEW_PARENT = "99999999-8888-7777-6666-555555555555";

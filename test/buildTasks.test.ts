@@ -223,6 +223,28 @@ describe("buildTaskEntities", () => {
     expect(built.warnings).toHaveLength(0);
   });
 
+  it("warns when a description contains tag-like <...> content (stripped by Dataverse)", () => {
+    const built = buildTaskEntities(
+      PROJECT,
+      [{ ref: "t1", subject: "X", bucket: BUCKET, description: "due <2 weeks> out" }],
+      resolve,
+    );
+    expect(built.warnings).toHaveLength(1);
+    expect(built.warnings[0]).toMatch(/angle-bracket/i);
+    expect(built.warnings[0]).toMatch(/tasks\[t1\]/);
+    // The description is still queued as-is (the warning does not block it).
+    expect(built.entities[0].msdyn_description).toBe("due <2 weeks> out");
+  });
+
+  it("does not warn for a description with only a lone < (no closing >)", () => {
+    const built = buildTaskEntities(
+      PROJECT,
+      [{ ref: "t1", subject: "X", bucket: BUCKET, description: "budget < 10k this quarter" }],
+      resolve,
+    );
+    expect(built.warnings).toHaveLength(0);
+  });
+
   it("rejects duplicate refs and missing required fields", () => {
     expect(() =>
       buildTaskEntities(

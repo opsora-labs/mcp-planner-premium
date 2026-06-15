@@ -10,6 +10,7 @@ import {
   throwIfPssCreateError,
 } from "../dataverse.js";
 import { validateAddEntities } from "./addTasks.js";
+import { hasStrippableTagContent } from "./readHelpers.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
@@ -201,6 +202,18 @@ export function buildTaskEntities(
           "] (taskId: " +
           id +
           "): 'effortHours' was ignored on summary task — PSS computes effort from leaf children automatically.",
+      );
+    }
+
+    // Dataverse strips tag-like <...> content from descriptions on save. Warn so
+    // the caller knows that text will not be stored (a lone < or > is fine).
+    if (hasStrippableTagContent(t.description)) {
+      warnings.push(
+        "tasks[" +
+          t.ref +
+          "] (taskId: " +
+          id +
+          "): description contains angle-bracket content (e.g. \"<...>\") that Dataverse strips on save — that text will not be stored. Remove or rephrase the angle brackets if it must be kept.",
       );
     }
 

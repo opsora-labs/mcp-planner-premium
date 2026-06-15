@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { summariseTasks, linkTypeLabel, type RawTask } from "../src/tools/readHelpers.js";
+import {
+  summariseTasks,
+  linkTypeLabel,
+  decodeDataverseText,
+  hasStrippableTagContent,
+  type RawTask,
+} from "../src/tools/readHelpers.js";
 
 const NOW = "2026-06-15T00:00:00Z";
 
@@ -22,6 +28,52 @@ describe("linkTypeLabel", () => {
   it("returns Unknown(N) for unrecognised values and undefined for non-numbers", () => {
     expect(linkTypeLabel(999)).toBe("Unknown(999)");
     expect(linkTypeLabel(undefined)).toBeUndefined();
+  });
+});
+
+describe("decodeDataverseText", () => {
+  it("decodes the standard entities Dataverse stores in descriptions", () => {
+    expect(decodeDataverseText("Risks: &quot;vendor lock-in&quot; &amp; data")).toBe(
+      'Risks: "vendor lock-in" & data',
+    );
+    expect(decodeDataverseText("&lt;tag&gt;")).toBe("<tag>");
+    expect(decodeDataverseText("it&#39;s &apos;quoted&apos;")).toBe("it's 'quoted'");
+  });
+
+  it("decodes &amp; LAST so an escaped entity is not double-decoded", () => {
+    // Stored "&amp;lt;" is the literal text "&lt;" — must NOT collapse to "<".
+    expect(decodeDataverseText("&amp;lt;")).toBe("&lt;");
+    expect(decodeDataverseText("&amp;quot;")).toBe('&quot;');
+  });
+
+  it("leaves plain text and unicode untouched", () => {
+    expect(decodeDataverseText("Budget €50k — José")).toBe("Budget €50k — José");
+    expect(decodeDataverseText("no entities here")).toBe("no entities here");
+  });
+
+  it("maps null/undefined to null (matches the read-tool field contract)", () => {
+    expect(decodeDataverseText(null)).toBeNull();
+    expect(decodeDataverseText(undefined)).toBeNull();
+  });
+});
+
+describe("hasStrippableTagContent", () => {
+  it("flags tag-like <...> spans that Dataverse strips", () => {
+    expect(hasStrippableTagContent("follow-up <2 weeks>")).toBe(true);
+    expect(hasStrippableTagContent("see <b>bold</b>")).toBe(true);
+    // Broad on purpose: a < ... > span counts even if not a real tag.
+    expect(hasStrippableTagContent("5 < 10 > 2")).toBe(true);
+  });
+
+  it("does NOT flag a lone < or > (those round-trip safely)", () => {
+    expect(hasStrippableTagContent("a < b")).toBe(false);
+    expect(hasStrippableTagContent("a > b")).toBe(false);
+    expect(hasStrippableTagContent("plain text, no brackets")).toBe(false);
+  });
+
+  it("is false for null/undefined", () => {
+    expect(hasStrippableTagContent(null)).toBe(false);
+    expect(hasStrippableTagContent(undefined)).toBe(false);
   });
 });
 

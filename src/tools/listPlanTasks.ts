@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { assertGuid, isGuid } from "../dataverse.js";
-import { pageAll, readHeaders, nowIso, type RawTask } from "./readHelpers.js";
+import { pageAll, readHeaders, nowIso, decodeDataverseText, type RawTask } from "./readHelpers.js";
 import type { ToolDef } from "./types.js";
 
 interface FullTask extends RawTask {
@@ -87,7 +87,7 @@ export const listPlanTasks: ToolDef = {
     const tasks = filtered.map((t) => ({
       taskId: t.msdyn_projecttaskid,
       subject: t.msdyn_subject,
-      description: t.msdyn_description ?? null,
+      description: decodeDataverseText(t.msdyn_description),
       start: t.msdyn_start ?? null,
       finish: t.msdyn_finish ?? null,
       progressPercent:

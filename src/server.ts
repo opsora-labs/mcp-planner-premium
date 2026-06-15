@@ -29,6 +29,7 @@ const SERVER_INSTRUCTIONS = [
   "9. After a write, treat get_plan_tasks_and_buckets as authoritative; if it returns truncated=true the read is incomplete - do not report success from it.",
   "Schema note: a plan's end date is msdyn_finish (not msdyn_scheduledend). Progress fields are 0-1 (0.5 = 50%); effort is in hours.",
   "Date range note: PSS clamps task dates to the plan's own start/finish range. Before adding tasks with explicit dates, set the plan's start/finish (via update on msdyn_project) to cover the full intended task date range — otherwise PSS silently normalises all task dates to the plan's current range.",
+  "Description note: Dataverse sanitises task descriptions. Standard special characters round-trip (the read tools decode &quot;/&amp;/&lt;/&gt; back to \" & < > to match the Planner UI), but tag-like angle-bracket content (e.g. <2 weeks>) is STRIPPED before storage and cannot be recovered — do not rely on literal <...> text surviving in a description.",
 ].join("\n");
 
 /**
