@@ -21,24 +21,45 @@ export const getTask: ToolDef = {
     const taskId = assertGuid(input.taskId, "taskId");
     const warnings: string[] = [];
 
-    const taskRes = await dvReq(
+    const BASE_SELECT =
+      "msdyn_projecttaskid,msdyn_subject,msdyn_description," +
+      "msdyn_start,msdyn_finish," +
+      "msdyn_progress,msdyn_effort,msdyn_remainingeffort,msdyn_duration," +
+      "msdyn_outlinelevel,msdyn_displaysequence,msdyn_ismilestone,msdyn_priority," +
+      "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value";
+    const EXPAND =
+      "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
+
+    // Try with actual-date fields first. Some tenants (Project Operations) have them;
+    // Planner Premium-only tenants don't. On a 400 mentioning those fields, retry
+    // without them and note the degradation.
+    let hasActualDates = true;
+    let taskRes = await dvReq(
       {
         url:
           BASE +
           "/msdyn_projecttasks(" +
           taskId +
-          ")?$select=msdyn_projecttaskid,msdyn_subject,msdyn_description," +
-          "msdyn_start,msdyn_finish," +
-          "msdyn_progress,msdyn_effort,msdyn_remainingeffort,msdyn_duration," +
-          "msdyn_outlinelevel,msdyn_displaysequence,msdyn_ismilestone,msdyn_priority," +
-          "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value" +
-          "&$expand=msdyn_projectbucket($select=msdyn_name)," +
-          "msdyn_parenttask($select=msdyn_subject)",
+          ")?$select=" +
+          BASE_SELECT +
+          ",msdyn_actualstart,msdyn_actualfinish" +
+          EXPAND,
         method: "GET",
         headers: dvHeaders(),
       },
       { retry: true },
     );
+    if (taskRes.status === 400 && /msdyn_actual(start|finish)/i.test(dvErrorMessage(taskRes))) {
+      hasActualDates = false;
+      taskRes = await dvReq(
+        {
+          url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + BASE_SELECT + EXPAND,
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+    }
     if (taskRes.status >= 400)
       throw new Error("get_task failed (" + taskRes.status + "): " + dvErrorMessage(taskRes));
     const t = taskRes.json || {};
@@ -119,6 +140,10 @@ export const getTask: ToolDef = {
         description: t.msdyn_description ?? null,
         start: t.msdyn_start ?? null,
         finish: t.msdyn_finish ?? null,
+        ...(hasActualDates && {
+          actualStart: t.msdyn_actualstart ?? null,
+          actualFinish: t.msdyn_actualfinish ?? null,
+        }),
         progressPercent:
           typeof t.msdyn_progress === "number" ? Math.round(t.msdyn_progress * 100) : null,
         effortHours: t.msdyn_effort ?? null,
