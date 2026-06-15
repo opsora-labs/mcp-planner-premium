@@ -182,10 +182,14 @@ export function buildTaskEntities(
       // PSS requires the project bind on the dependency entity too. Without it
       // the API defaults to the zero GUID (00000000-…) which it then rejects as
       // not matching the operation set's project (ScheduleAPI-OV-0001).
+      // On msdyn_projecttaskdependency ALL lookup nav-properties use the PascalCase
+      // schema name, not the lowercase logical name. msdyn_project@odata.bind causes
+      // "undeclared property 'msdyn_project' which only has property annotations"
+      // because the schema nav-property is msdyn_Project (capital P).
       const depEnt: Record<string, unknown> = {
         "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency",
         msdyn_projecttaskdependencyid: randomUUID(),
-        "msdyn_project@odata.bind": "/msdyn_projects(" + projectId + ")",
+        "msdyn_Project@odata.bind": "/msdyn_projects(" + projectId + ")",
         "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + predId + ")",
         "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + id + ")",
       };

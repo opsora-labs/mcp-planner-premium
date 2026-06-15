@@ -206,6 +206,17 @@ export function validateAddEntities(entities: any[]): void {
       }
     }
     if (t === "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency") {
+      // On dependency entities ALL lookup nav-properties use PascalCase schema names.
+      // Teach the correct casing for the project bind (different from task entities
+      // where msdyn_project@odata.bind, lowercase, is correct).
+      if (Object.prototype.hasOwnProperty.call(ent, "msdyn_project@odata.bind")) {
+        throw new Error(
+          "entities[" +
+            i +
+            "] (dependency): 'msdyn_project@odata.bind' is not a valid navigation property on msdyn_projecttaskdependency." +
+            " Use 'msdyn_Project@odata.bind' (capital P) — all lookup binds on dependency entities use PascalCase schema names.",
+        );
+      }
       if (
         !ent["msdyn_PredecessorTask@odata.bind"] ||
         !ent["msdyn_SuccessorTask@odata.bind"]

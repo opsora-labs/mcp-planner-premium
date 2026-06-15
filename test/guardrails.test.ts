@@ -105,7 +105,7 @@ describe("validateAddEntities", () => {
     );
   });
 
-  it("teaches the PascalCase nav-property for lowercase dependency binds", () => {
+  it("teaches the PascalCase nav-property for lowercase dependency task binds", () => {
     expect(() =>
       validateAddEntities([
         {
@@ -115,6 +115,21 @@ describe("validateAddEntities", () => {
         },
       ]),
     ).toThrow(/is not a valid navigation property. Use 'msdyn_PredecessorTask@odata.bind'/);
+  });
+
+  it("teaches msdyn_Project (capital P) for lowercase project bind on dependency", () => {
+    // msdyn_project@odata.bind (lowercase) is correct on msdyn_projecttask but
+    // is undeclared on msdyn_projecttaskdependency — it must be msdyn_Project.
+    expect(() =>
+      validateAddEntities([
+        {
+          "@odata.type": DEP,
+          "msdyn_project@odata.bind": "/msdyn_projects(" + guid(3) + ")",
+          "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+          "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+        },
+      ]),
+    ).toThrow(/msdyn_Project@odata.bind.*capital P/);
   });
 
   it("rejects an invalid dependency link type", () => {
