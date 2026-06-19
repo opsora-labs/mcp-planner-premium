@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Write(./.env)",
+      "Write(./.env.*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(npm publish:*)",
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm update:*)",
+      "Bash(npm ci:*)",
+      "Bash(docker:*)"
+    ],
+    "allow": [
+      "Bash(npm test:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run typecheck:e2e:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npx vitest:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git switch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git restore:*)",
+      "Bash(git stash:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(node --version)",
+      "Bash(npm ls:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block-dangerous-bash.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/protect-paths.mjs\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/verify-on-stop.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -7,3 +7,6 @@ dist/
 
 # Claude Code: personal, per-user overrides (shared config lives in .claude/settings.json)
 .claude/settings.local.json
+
+# Cached Entra refresh token — never commit (see scripts/auth-login.ts)
+.tokens.json

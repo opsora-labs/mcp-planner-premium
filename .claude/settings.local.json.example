@@ -1,0 +1,14 @@
+{
+  "//": "Copy this file to .claude/settings.local.json for PERSONAL overrides.",
+  "//2": "settings.local.json is gitignored — it is yours alone and never shared.",
+  "//3": "It is merged on top of .claude/settings.json. Use it to allow extra",
+  "//4": "commands you trust on your machine, or to set a model. Do NOT weaken the",
+  "//5": "safety hooks here — they live in the shared settings.json on purpose.",
+
+  "permissions": {
+    "allow": [
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)"
+    ]
+  }
+}
