@@ -16,6 +16,7 @@ const resolve = (b: string) => (GUID_RE.test(b) ? b : BUCKET);
 
 const TASK = "Microsoft.Dynamics.CRM.msdyn_projecttask";
 const DEP = "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency";
+const CHK = "Microsoft.Dynamics.CRM.msdyn_projectchecklist";
 
 describe("buildTaskEntities", () => {
   it("builds a minimal task with generated GUID and correct binds", () => {
@@ -173,6 +174,114 @@ describe("buildTaskEntities", () => {
     );
     const firstDep = built.entities.findIndex((e) => e["@odata.type"] === DEP);
     expect(lastTask).toBeLessThan(firstDep);
+    expect(() => validateAddEntities(built.entities)).not.toThrow();
+  });
+
+  it("builds checklist items (string + object form) as child entities", () => {
+    const built = buildTaskEntities(
+      PROJECT,
+      [
+        {
+          ref: "t1",
+          subject: "Prepare",
+          bucket: BUCKET,
+          checklist: ["Draft outline", { title: "Review", completed: true }],
+        },
+      ],
+      resolve,
+    );
+    const chks = built.entities.filter((e) => e["@odata.type"] === CHK);
+    expect(chks).toHaveLength(2);
+    expect(built.checklistIds).toHaveLength(2);
+    const taskId = built.refToId.t1;
+    for (const c of chks) {
+      expect(c["msdyn_ProjectTaskId@odata.bind"]).toBe("/msdyn_projecttasks(" + taskId + ")");
+      expect(typeof c.msdyn_name).toBe("string");
+      expect(GUID_RE.test(c.msdyn_projectchecklistid)).toBe(true);
+    }
+    const byName = Object.fromEntries(chks.map((c) => [c.msdyn_name, c]));
+    expect(byName["Draft outline"].msdyn_projectchecklistcompleted).toBe(false);
+    expect(byName["Review"].msdyn_projectchecklistcompleted).toBe(true);
+    // Checklist entities come after task entities and pass the raw guardrails.
+    expect(() => validateAddEntities(built.entities)).not.toThrow();
+  });
+
+  it("rejects an empty checklist item title", () => {
+    expect(() =>
+      buildTaskEntities(
+        PROJECT,
+        [{ ref: "t1", subject: "X", bucket: BUCKET, checklist: ["  "] }],
+        resolve,
+      ),
+    ).toThrow(/checklist item title/i);
+  });
+
+  it("binds a sprint via the resolver", () => {
+    const SPRINT = "cccccccc-1111-2222-3333-444444444444";
+    const built = buildTaskEntities(
+      PROJECT,
+      [{ ref: "t1", subject: "X", bucket: BUCKET, sprint: "Sprint 1" }],
+      resolve,
+      LINK_TYPE_VALUES_GLOBAL,
+      () => SPRINT,
+    );
+    const task = built.entities.find((e) => e["@odata.type"] === TASK)!;
+    expect(task["msdyn_projectsprint@odata.bind"]).toBe("/msdyn_projectsprints(" + SPRINT + ")");
+  });
+
+  it("throws when a sprint cannot be resolved", () => {
+    expect(() =>
+      buildTaskEntities(
+        PROJECT,
+        [{ ref: "t1", subject: "X", bucket: BUCKET, sprint: "Ghost" }],
+        resolve,
+        LINK_TYPE_VALUES_GLOBAL,
+        () => "",
+      ),
+    ).toThrow(/sprint 'Ghost' could not be resolved/i);
+  });
+
+  it("builds a label junction for a resolved label and warns + skips an unknown one", () => {
+    const LBL = "Microsoft.Dynamics.CRM.msdyn_projecttasktolabel";
+    const LABEL = "dddddddd-1111-2222-3333-555555555555";
+    const built = buildTaskEntities(
+      PROJECT,
+      [{ ref: "t1", subject: "X", bucket: BUCKET, labels: ["Issue / Risk", "Unknown"] }],
+      resolve,
+      LINK_TYPE_VALUES_GLOBAL,
+      undefined,
+      (l) => (l === "Issue / Risk" ? LABEL : ""),
+    );
+    const junctions = built.entities.filter((e) => e["@odata.type"] === LBL);
+    expect(junctions).toHaveLength(1);
+    expect(junctions[0]["msdyn_ProjectLabelId@odata.bind"]).toBe("/msdyn_projectlabels(" + LABEL + ")");
+    expect(built.warnings.some((w) => /label 'Unknown' was skipped/i.test(w))).toBe(true);
+  });
+
+  it("builds a resource assignment for a resolved team member (no start/finish)", () => {
+    const ASG = "Microsoft.Dynamics.CRM.msdyn_resourceassignment";
+    const TEAM = "eeeeeeee-1111-2222-3333-666666666666";
+    const RES = "ffffffff-1111-2222-3333-777777777777";
+    const built = buildTaskEntities(
+      PROJECT,
+      [{ ref: "t1", subject: "X", bucket: BUCKET, assignees: ["Jane", "Ghost"] }],
+      resolve,
+      LINK_TYPE_VALUES_GLOBAL,
+      undefined,
+      undefined,
+      (a) => (a === "Jane" ? { teamMemberId: TEAM, bookableResourceId: RES } : null),
+    );
+    const asg = built.entities.filter((e) => e["@odata.type"] === ASG);
+    expect(asg).toHaveLength(1);
+    expect(asg[0]["msdyn_taskid@odata.bind"]).toBe("/msdyn_projecttasks(" + built.refToId.t1 + ")");
+    expect(asg[0]["msdyn_projectid@odata.bind"]).toBe("/msdyn_projects(" + PROJECT + ")");
+    expect(asg[0]["msdyn_projectteamid@odata.bind"]).toBe("/msdyn_projectteams(" + TEAM + ")");
+    expect(asg[0]["msdyn_bookableresourceid@odata.bind"]).toBe("/bookableresources(" + RES + ")");
+    // start/finish are blocked on create for assignments — must not be present.
+    expect("msdyn_start" in asg[0]).toBe(false);
+    expect("msdyn_finish" in asg[0]).toBe(false);
+    expect(built.warnings.some((w) => /assignee 'Ghost' was skipped/i.test(w))).toBe(true);
+    // The assignment's lowercase project bind must pass the (now entity-aware) guard.
     expect(() => validateAddEntities(built.entities)).not.toThrow();
   });
 

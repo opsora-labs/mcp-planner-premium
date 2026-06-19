@@ -35,15 +35,23 @@ const HIERARCHY_BLOCKED = ["msdyn_outlinelevel", "msdyn_displaysequence"];
 // Wrong navigation-property names observed (or likely) in agent-generated payloads. These are
 // NOT valid @odata.bind navigation properties; the value is fine, only the key is wrong. We
 // THROW (never auto-correct) so the calling agent learns the right key for the rest of the session.
-const BIND_ALIASES: Record<string, string> = {
+// These are scoped PER ENTITY TYPE: the SAME key can be correct on one entity and
+// wrong on another. e.g. `msdyn_projectid@odata.bind` is WRONG on a task (use
+// `msdyn_project`) but CORRECT on msdyn_resourceassignment / msdyn_projectlabel.
+// So the task aliases only apply to task entities and the dependency aliases only
+// to dependency entities — other entity types (assignments, checklists, labels,
+// sprints, buckets) are left to PSS to validate.
+const TASK_BIND_ALIASES: Record<string, string> = {
   "msdyn_bucket@odata.bind": "msdyn_projectbucket@odata.bind",
   "msdyn_projectbucketid@odata.bind": "msdyn_projectbucket@odata.bind",
   "msdyn_projectid@odata.bind": "msdyn_project@odata.bind",
   "msdyn_parent@odata.bind": "msdyn_parenttask@odata.bind",
   "msdyn_parenttaskid@odata.bind": "msdyn_parenttask@odata.bind",
-  // Dependency lookups bind on the PascalCase schema names. The lowercase
-  // logical names make Dataverse reject the payload as an annotation-only
-  // property with no value; teach the correct key instead.
+};
+// Dependency lookups bind on the PascalCase schema names. The lowercase logical
+// names make Dataverse reject the payload as an annotation-only property with no
+// value; teach the correct key instead.
+const DEP_BIND_ALIASES: Record<string, string> = {
   "msdyn_predecessortask@odata.bind": "msdyn_PredecessorTask@odata.bind",
   "msdyn_successortask@odata.bind": "msdyn_SuccessorTask@odata.bind",
 };
@@ -106,18 +114,28 @@ export function validateAddEntities(entities: any[]): void {
           ALLOWED.join(", "),
       );
     }
-    // Reject known wrong @odata.bind navigation-property names (teaches the correct key).
-    for (const wrong in BIND_ALIASES) {
-      if (Object.prototype.hasOwnProperty.call(ent, wrong)) {
-        throw new Error(
-          "entities[" +
-            i +
-            "]: '" +
-            wrong +
-            "' is not a valid navigation property. Use '" +
-            BIND_ALIASES[wrong] +
-            "' instead (value unchanged).",
-        );
+    // Reject known wrong @odata.bind navigation-property names (teaches the correct
+    // key). Scoped per entity type so a bind that is valid on one entity is not
+    // falsely rejected on another.
+    const aliasMap =
+      t === "Microsoft.Dynamics.CRM.msdyn_projecttask"
+        ? TASK_BIND_ALIASES
+        : t === "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency"
+          ? DEP_BIND_ALIASES
+          : null;
+    if (aliasMap) {
+      for (const wrong in aliasMap) {
+        if (Object.prototype.hasOwnProperty.call(ent, wrong)) {
+          throw new Error(
+            "entities[" +
+              i +
+              "]: '" +
+              wrong +
+              "' is not a valid navigation property. Use '" +
+              aliasMap[wrong] +
+              "' instead (value unchanged).",
+          );
+        }
       }
     }
     const bad = Object.keys(ent).filter((k) =>

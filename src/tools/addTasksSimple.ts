@@ -40,6 +40,11 @@ export interface SimpleDependency {
   lagMinutes?: number;
 }
 
+export interface ChecklistItem {
+  title: string;
+  completed?: boolean;
+}
+
 export interface SimpleTask {
   ref: string;
   subject: string;
@@ -53,7 +58,22 @@ export interface SimpleTask {
   parent?: string; // a ref in this batch, or an existing task GUID
   milestone?: boolean;
   dependsOn?: SimpleDependency[];
+  /** Checklist items: plain strings (titles) or {title, completed}. */
+  checklist?: (string | ChecklistItem)[];
+  /** Sprint to place this task in: sprint name (resolved against the plan) or a sprintId GUID. */
+  sprint?: string;
+  /** Labels to tag this task with: label TEXT (resolved against the plan's existing
+   * labels) or a labelId GUID. Labels themselves cannot be created via the API
+   * (Project UI only) — an unknown label is skipped with a warning. */
+  labels?: string[];
+  /** Assign team members to this task: member name (resolved against the plan's
+   * project team) or a teamMemberId GUID. The person must already be on the
+   * project team — an unknown assignee is skipped with a warning. */
+  assignees?: string[];
 }
+
+/** Resolves a team-member reference to the ids a resource assignment needs. */
+export type ResolveAssignee = (assignee: string) => { teamMemberId: string; bookableResourceId: string } | null;
 
 export interface BuiltBatch {
   entities: any[];
@@ -65,6 +85,8 @@ export interface BuiltBatch {
    * PSS requires these to be deleted BEFORE their referenced tasks — include
    * them in delete_tasks_batch records when cleaning up. */
   dependencyIds: string[];
+  /** GUIDs of checklist items created (msdyn_projectchecklistid). */
+  checklistIds: string[];
   /** Non-fatal warnings about caller-supplied values that PSS will silently
    * ignore or override (e.g. effortHours on a summary task). */
   warnings: string[];
@@ -122,6 +144,9 @@ export function buildTaskEntities(
   tasks: SimpleTask[],
   resolveBucketId: (bucket: string) => string,
   linkTypeValues: Record<string, number> = LINK_TYPE_VALUES_GLOBAL,
+  resolveSprintId?: (sprint: string) => string,
+  resolveLabelId?: (label: string) => string,
+  resolveAssignee?: ResolveAssignee,
 ): BuiltBatch {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
@@ -166,8 +191,12 @@ export function buildTaskEntities(
 
   const taskEntities: any[] = [];
   const depEntities: any[] = [];
+  const checklistEntities: any[] = [];
+  const labelEntities: any[] = [];
+  const assignmentEntities: any[] = [];
   const milestoneTaskIds: string[] = [];
   const dependencyIds: string[] = [];
+  const checklistIds: string[] = [];
   const warnings: string[] = [];
 
   for (const t of ordered) {
@@ -188,6 +217,15 @@ export function buildTaskEntities(
     if (t.parent) {
       const parentId = isGuid(t.parent) ? t.parent : refToId[t.parent];
       ent["msdyn_parenttask@odata.bind"] = "/msdyn_projecttasks(" + parentId + ")";
+    }
+    if (t.sprint) {
+      const raw = t.sprint.trim();
+      const sprintId = resolveSprintId ? resolveSprintId(raw) : isGuid(raw) ? raw : "";
+      if (!sprintId)
+        throw new Error(
+          "Task '" + t.ref + "': sprint '" + raw + "' could not be resolved. Pass a sprintId GUID, or a sprint name that exists in the plan (create it first with add_sprint).",
+        );
+      ent["msdyn_projectsprint@odata.bind"] = "/msdyn_projectsprints(" + sprintId + ")";
     }
     // milestone is BLOCKED on create - never put it in the payload; surface it
     // instead so the caller can set it via a follow-up update_tasks_batch.
@@ -260,13 +298,81 @@ export function buildTaskEntities(
       }
       depEntities.push(depEnt);
     }
+
+    // Checklist items — child rows of the task. msdyn_name is the item title;
+    // msdyn_ProjectTaskId is the PascalCase nav-property for the parent task.
+    for (const raw of t.checklist || []) {
+      const item: ChecklistItem = typeof raw === "string" ? { title: raw } : raw;
+      const title = (item.title || "").trim();
+      if (!title)
+        throw new Error("Task '" + t.ref + "': checklist item title must not be empty.");
+      const chkId = randomUUID();
+      checklistIds.push(chkId);
+      checklistEntities.push({
+        "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projectchecklist",
+        msdyn_projectchecklistid: chkId,
+        "msdyn_ProjectTaskId@odata.bind": "/msdyn_projecttasks(" + id + ")",
+        msdyn_name: title,
+        msdyn_projectchecklistcompleted: item.completed === true,
+      });
+    }
+
+    // Labels — junction rows (msdyn_projecttasktolabel) linking the task to an
+    // EXISTING plan label. Labels can't be created via the API; an unresolved
+    // label is skipped with a warning rather than failing the batch.
+    for (const rawLabel of t.labels || []) {
+      const label = (rawLabel || "").trim();
+      if (!label) continue;
+      const labelId = resolveLabelId ? resolveLabelId(label) : isGuid(label) ? label : "";
+      if (!labelId) {
+        warnings.push(
+          "tasks[" + t.ref + "]: label '" + label + "' was skipped — no such label in this plan. " +
+            "Labels cannot be created via the API (Project UI only); create it in the Planner/Project UI first, then re-run.",
+        );
+        continue;
+      }
+      labelEntities.push({
+        "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttasktolabel",
+        msdyn_projecttasktolabelid: randomUUID(),
+        "msdyn_ProjectLabelId@odata.bind": "/msdyn_projectlabels(" + labelId + ")",
+        "msdyn_ProjectTaskId@odata.bind": "/msdyn_projecttasks(" + id + ")",
+      });
+    }
+
+    // Assignees — msdyn_resourceassignment links the task to a project team member.
+    // start/finish are blocked on create (PSS derives them from the task); name +
+    // the four lookup binds are what's needed. Unknown assignees are skipped.
+    for (const rawAssignee of t.assignees || []) {
+      const assignee = (rawAssignee || "").trim();
+      if (!assignee) continue;
+      const member = resolveAssignee ? resolveAssignee(assignee) : null;
+      if (!member) {
+        warnings.push(
+          "tasks[" + t.ref + "]: assignee '" + assignee + "' was skipped — not a member of this plan's project team. " +
+            "Add the person to the project team first (they must be a bookable Project resource).",
+        );
+        continue;
+      }
+      const asgEnt: Record<string, unknown> = {
+        "@odata.type": "Microsoft.Dynamics.CRM.msdyn_resourceassignment",
+        msdyn_resourceassignmentid: randomUUID(),
+        msdyn_name: assignee,
+        "msdyn_taskid@odata.bind": "/msdyn_projecttasks(" + id + ")",
+        "msdyn_projectid@odata.bind": "/msdyn_projects(" + projectId + ")",
+        "msdyn_projectteamid@odata.bind": "/msdyn_projectteams(" + member.teamMemberId + ")",
+      };
+      if (member.bookableResourceId)
+        asgEnt["msdyn_bookableresourceid@odata.bind"] = "/bookableresources(" + member.bookableResourceId + ")";
+      assignmentEntities.push(asgEnt);
+    }
   }
 
   return {
-    entities: [...taskEntities, ...depEntities],
+    entities: [...taskEntities, ...depEntities, ...checklistEntities, ...labelEntities, ...assignmentEntities],
     refToId,
     milestoneTaskIds,
     dependencyIds,
+    checklistIds,
     warnings,
   };
 }
@@ -314,6 +420,35 @@ const taskSchema = z.object({
     .array(dependencySchema)
     .optional()
     .describe("Predecessor dependencies for this task."),
+  checklist: z
+    .array(
+      z.union([
+        z.string(),
+        z.object({ title: z.string(), completed: z.boolean().optional() }),
+      ]),
+    )
+    .optional()
+    .describe(
+      "Checklist items for this task: plain strings (titles) or {title, completed}. Each counts toward the 200-entity batch cap.",
+    ),
+  sprint: z
+    .string()
+    .optional()
+    .describe(
+      "Place this task in a sprint: sprint NAME (resolved against the plan) or a sprintId GUID. Create the sprint first with add_sprint.",
+    ),
+  labels: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Tag this task with EXISTING plan labels: label text (resolved against the plan) or labelId GUIDs. Labels themselves cannot be created via the API (Project UI only) — unknown labels are skipped with a warning.",
+    ),
+  assignees: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Assign project-team members to this task: member name (resolved against the plan's project team) or teamMemberId GUIDs (from list_team_members). The person must already be on the project team — unknown assignees are skipped with a warning.",
+    ),
 });
 
 // Ergonomic create - the model sends a plain task list; the server builds the
@@ -322,7 +457,7 @@ export const addTasksSimple: ToolDef = {
   name: "add_tasks",
   title: "Add Tasks to Plan",
   description:
-    "Adds tasks (with optional hierarchy and dependencies) to a plan from a SIMPLE list - the server builds the Dataverse payload, so you do NOT write @odata.type, @odata.bind, GUIDs or option-set numbers. Requires an open change session (operationSetId) and the projectId. Give each task a short 'ref' (unique in the batch); set 'parent' to another task's ref (or an existing task GUID) to nest it. You may list tasks in ANY order and nest to ANY depth (e.g. 6+ levels) - the server orders parents before children automatically and never sends outline level. Reference a predecessor the same way (ref or existing GUID). Bucket may be a name (resolved against the plan) or a bucketId. Dependencies default to Finish-to-Start. Milestones cannot be set on create - they come back in milestoneTaskIds for a follow-up update_tasks_batch. Max 200 entities (tasks + dependencies combined). Returns taskRefs (your ref -> created taskId) so you can reference tasks later without re-reading. Nothing is saved until 'Apply Changes to Plan'. For checklists, sprints, resource assignments or custom fields, use the advanced add_tasks_batch instead.",
+    "Adds tasks (with optional hierarchy and dependencies) to a plan from a SIMPLE list - the server builds the Dataverse payload, so you do NOT write @odata.type, @odata.bind, GUIDs or option-set numbers. Requires an open change session (operationSetId) and the projectId. Give each task a short 'ref' (unique in the batch); set 'parent' to another task's ref (or an existing task GUID) to nest it. You may list tasks in ANY order and nest to ANY depth (e.g. 6+ levels) - the server orders parents before children automatically and never sends outline level. Reference a predecessor the same way (ref or existing GUID). Bucket may be a name (resolved against the plan) or a bucketId. Dependencies default to Finish-to-Start. Milestones cannot be set on create - they come back in milestoneTaskIds for a follow-up update_tasks_batch. Each task may also carry checklist items (checklist), a sprint (sprint - create it first with add_sprint), labels (labels - existing plan labels only; labels cannot be created via the API), and assignees (assignees - project-team members by name or id). Max 200 entities (tasks + dependencies + checklist items + label/assignment links combined). Returns taskRefs (your ref -> created taskId) so you can reference tasks later without re-reading. Nothing is saved until 'Apply Changes to Plan'. For custom fields or entity types this tool does not model, use the advanced add_tasks_batch instead.",
   inputSchema: {
     operationSetId: z
       .string()
@@ -402,11 +537,122 @@ export const addTasksSimple: ToolDef = {
       return isGuid(b) ? b : nameToId[b.toLowerCase()];
     };
 
+    // Resolve sprint names -> sprintIds with a single read (skip if all GUIDs/none).
+    const wantedSprints = new Set<string>();
+    for (const t of tasks) {
+      const s = (t.sprint || "").trim();
+      if (s && !isGuid(s)) wantedSprints.add(s.toLowerCase());
+    }
+    const sprintNameToId: Record<string, string> = {};
+    if (wantedSprints.size > 0) {
+      const res = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projectsprints?$select=msdyn_projectsprintid,msdyn_name&$filter=_msdyn_project_value eq " +
+            projectId +
+            "&$top=200",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (res.status >= 400)
+        throw new Error("sprint lookup failed (" + res.status + "): " + dvErrorMessage(res));
+      const counts: Record<string, number> = {};
+      for (const s of res.json?.value || []) {
+        const key = String(s.msdyn_name || "").trim().toLowerCase();
+        counts[key] = (counts[key] || 0) + 1;
+        sprintNameToId[key] = s.msdyn_projectsprintid;
+      }
+      for (const name of wantedSprints) {
+        if (!sprintNameToId[name])
+          throw new Error(
+            "No sprint named '" + name + "' in this plan. Create it first with add_sprint, or pass a sprintId GUID.",
+          );
+        if (counts[name] > 1)
+          throw new Error(
+            "Multiple sprints named '" + name + "' in this plan - pass the sprintId GUID instead of the name.",
+          );
+      }
+    }
+    const resolveSprintId = (sprint: string): string => {
+      const s = (sprint || "").trim();
+      return isGuid(s) ? s : sprintNameToId[s.toLowerCase()] || "";
+    };
+
+    // Resolve label text -> labelId against the plan's EXISTING labels (labels
+    // cannot be created via the API). Unknown labels resolve to "" and are skipped
+    // with a warning inside buildTaskEntities.
+    const wantsLabels = tasks.some((t) => (t.labels?.length ?? 0) > 0);
+    const labelTextToId: Record<string, string> = {};
+    if (wantsLabels) {
+      const res = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projectlabels?$select=msdyn_projectlabelid,msdyn_projectlabeltext&$filter=_msdyn_project_value eq " +
+            projectId +
+            "&$top=200",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (res.status < 400) {
+        for (const l of res.json?.value || []) {
+          const key = String(l.msdyn_projectlabeltext || "").trim().toLowerCase();
+          if (key) labelTextToId[key] = l.msdyn_projectlabelid;
+        }
+      }
+      // A failed label read is non-fatal: labels just won't resolve (skipped + warned).
+    }
+    const resolveLabelId = (label: string): string => {
+      const l = (label || "").trim();
+      return isGuid(l) ? l : labelTextToId[l.toLowerCase()] || "";
+    };
+
+    // Resolve assignees against the plan's project team (by name or teamMemberId).
+    const wantsAssignees = tasks.some((t) => (t.assignees?.length ?? 0) > 0);
+    const teamById: Record<string, { teamMemberId: string; bookableResourceId: string }> = {};
+    const teamByName: Record<string, { teamMemberId: string; bookableResourceId: string }> = {};
+    if (wantsAssignees) {
+      const res = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projectteams?$select=msdyn_projectteamid,msdyn_name,_msdyn_bookableresourceid_value&$filter=_msdyn_project_value eq " +
+            projectId +
+            "&$top=200",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (res.status < 400) {
+        for (const m of res.json?.value || []) {
+          const entry = {
+            teamMemberId: m.msdyn_projectteamid,
+            bookableResourceId: m._msdyn_bookableresourceid_value,
+          };
+          teamById[String(m.msdyn_projectteamid).toLowerCase()] = entry;
+          const nm = String(m.msdyn_name || "").trim().toLowerCase();
+          if (nm) teamByName[nm] = entry;
+        }
+      }
+      // A failed team read is non-fatal: assignees just won't resolve (skipped + warned).
+    }
+    const resolveAssignee: ResolveAssignee = (assignee: string) => {
+      const a = (assignee || "").trim();
+      if (isGuid(a)) return teamById[a.toLowerCase()] ?? null;
+      return teamByName[a.toLowerCase()] ?? null;
+    };
+
     const linkTypeValues =
       getEnv().DATAVERSE_LINK_TYPE_STYLE === "eu"
         ? LINK_TYPE_VALUES_EU
         : LINK_TYPE_VALUES_GLOBAL;
-    const built = buildTaskEntities(projectId, tasks, resolveBucketId, linkTypeValues);
+    const built = buildTaskEntities(projectId, tasks, resolveBucketId, linkTypeValues, resolveSprintId, resolveLabelId, resolveAssignee);
 
     // Defense in depth: the built collection must still pass the raw guardrails.
     validateAddEntities(built.entities);
@@ -459,6 +705,7 @@ export const addTasksSimple: ToolDef = {
       taskRefs: built.refToId,
       milestoneTaskIds: built.milestoneTaskIds,
       dependencyIds: built.dependencyIds,
+      checklistIds: built.checklistIds.length > 0 ? built.checklistIds : undefined,
       warnings: built.warnings.length > 0 ? built.warnings : undefined,
       response: response.json || {},
       note:

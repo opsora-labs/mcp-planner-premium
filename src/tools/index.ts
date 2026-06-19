@@ -2,6 +2,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolDef } from "./types.js";
 import { createPlan } from "./createPlan.js";
 import { addBucket } from "./addBucket.js";
+import { addSprint } from "./addSprint.js";
 import { startChangeSession } from "./startChangeSession.js";
 import { addTasksSimple } from "./addTasksSimple.js";
 import { addTasks } from "./addTasks.js";
@@ -32,6 +33,7 @@ import { describeOptionSet } from "./describeOptionSet.js";
 export const allTools: ToolDef[] = [
   createPlan,
   addBucket,
+  addSprint,
   startChangeSession,
   addTasksSimple,
   addTasks,
@@ -85,6 +87,7 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   // Additive writes (create new records, don't overwrite/remove existing data)
   create_plan: ADD,
   add_bucket: ADD,
+  add_sprint: ADD,
   add_tasks: ADD,
   add_tasks_batch: ADD,
   start_change_session: ADD,

@@ -9,7 +9,7 @@
  *   B  Read-back verify — counts, hierarchy depth, buckets, dependencies, spot-checks
  *   C  PM operations    — reschedule, re-bucket, re-prioritise, progress rollup, add/delete
  *   D  Guardrails       — 200-cap, summary protection, confirm gate, whole-plan block, etc.
- *   E  Known gaps       — milestone (blocked), labels/sprint/checklist/assignee (batch-only)
+ *   E  Rich features    — checklist + sprint + assignees (verified); milestone blocked; labels UI-only
  *   F  Cleanup          — delete the disposable ZZ-MCP-PMTEST-* plan
  *
  * Usage:
@@ -713,15 +713,51 @@ async function main(): Promise<void> {
     }, "milestone");
   }
 
-  // Documented batch-only gaps (not exercised — schema-specific raw entities).
-  for (const [feat, entity] of [
-    ["Labels", "msdyn_projecttasktolabel"],
-    ["Sprint assignment", "msdyn_projectsprint"],
-    ["Checklist items", "msdyn_projectchecklist"],
-    ["Assignees / resources", "msdyn_resourceassignment"],
-  ] as [string, string][]) {
-    rec({ phase: "E", name: `${feat} — batch-only (no simple-tool support)`, tool: "add_tasks_batch", status: "info", latencyMs: 0, evidence: `requires raw ${entity} entities; not surfaced by add_tasks/update_tasks` });
-  }
+  // Checklist + sprint + assignees are now first-class on add_tasks — exercise
+  // them on a real feature-rich task and verify each persisted.
+  const sprintName = "PM-Test Sprint";
+  await step("E", "add_sprint creates a sprint", "add_sprint", async () => {
+    const r = await mc(ctx, "add_sprint", { name: sprintName, projectId, start: "2026-07-01", finish: "2026-07-14" });
+    if (!r.sprintId) throw new Error("no sprintId");
+    return { sprintId: r.sprintId };
+  });
+
+  const teamMembers = await step("E", "list_team_members (plan auto-includes creator)", "list_team_members", async () => {
+    const r = await mc(ctx, "list_team_members", { projectId });
+    if (!(r.count > 0)) throw new Error("expected at least one team member");
+    return r.members as { teamMemberId: string; name: string }[];
+  });
+  const memberName = teamMembers?.[0]?.name;
+
+  await step("E", "checklist + sprint + assignee on one task (verified)", "add_tasks", async () => {
+    const os = await startSession(ctx, projectId, "features");
+    const r = await mc(ctx, "add_tasks", {
+      operationSetId: os,
+      projectId,
+      tasks: [{
+        ref: "feat",
+        subject: "ZZ feature-rich task",
+        bucket: bucketIdByName.get(allBuckets[0]),
+        parent: (contents?.summaryTaskIds ?? [])[0],
+        sprint: sprintName,
+        checklist: ["Plan", "Build", { title: "Ship", completed: true }],
+        assignees: memberName ? [memberName] : [],
+        labels: ["ZZ-no-such-label"],
+      }],
+    });
+    // Labels can't be created via the API → the unknown one is skipped with a warning.
+    const warned = JSON.stringify(r.warnings ?? []).toLowerCase().includes("label");
+    await applyOps(ctx, os);
+    const taskId = (r.taskRefs as Record<string, string>).feat;
+    const v = await mc(ctx, "get_task", { taskId });
+    if (!v.task?.sprintId) throw new Error("sprint not set on task");
+    if (memberName && !(v.assignments?.length > 0)) throw new Error("assignee not attached");
+    const chk = await dv(ctx, "GET", `/msdyn_projectchecklists?$filter=_msdyn_projecttaskid_value eq ${taskId}&$select=msdyn_projectchecklistid`);
+    if ((chk.json?.value?.length ?? 0) !== 3) throw new Error(`expected 3 checklist items, got ${chk.json?.value?.length}`);
+    return { sprint: true, assignees: v.assignments?.length ?? 0, checklist: 3, labelSkippedWithWarning: warned };
+  });
+
+  rec({ phase: "E", name: "Labels — create is UI-only (API limitation); assign-to-existing supported", tool: "add_tasks", status: "info", latencyMs: 0, evidence: "msdyn_projectlabel cannot be created via direct OData or PSS; add_tasks assigns existing labels and warns on unknown ones" });
 
   // ════════════════════════ PHASE F — CLEANUP ════════════════════════
   console.log("PHASE F — Cleanup");
