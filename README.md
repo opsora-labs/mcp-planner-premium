@@ -29,7 +29,7 @@ MCP host (OAuth client)
         |
         v
 this server (stateless, streamable HTTP)
-   - 23 tools (incl. whoami diagnostic)
+   - 25 tools (incl. whoami diagnostic)
    - validates then forwards the inbound bearer to Dataverse
         |
         v
@@ -52,11 +52,12 @@ preserved.
 
 ## Read tools
 
-The 8 read tools (`list_plans`, `get_plan_summary`, `get_plan_tasks_and_buckets`,
-`get_task`, `list_plan_tasks`, `get_bucket_breakdown`, `list_dependencies`,
-`list_team_members`) cover Planner-Premium reporting and exploration in the same
-delegated context as the write tools — **one connection, one token, one
-allow-listed surface**.
+The read tools (`list_plans`, `list_my_tasks`, `get_plan_summary`,
+`get_plan_tasks_and_buckets`, `get_task`, `list_plan_tasks`, `get_bucket_breakdown`,
+`list_dependencies`, `list_team_members`) cover Planner-Premium reporting and
+exploration in the same delegated context as the write tools — **one connection,
+one token, one allow-listed surface**. `list_my_tasks` resolves "me" via `whoami`
+(→ the user's bookable resource) so the caller never passes a user id.
 
 > **Verification independence.** Read and write tools share this server's code
 > and token. For *confirming a write you just made*, prefer an independent path
@@ -83,8 +84,9 @@ means the server is not dangerous even when used from a host with no skill loade
 |---|---|
 | `create_plan` | Create a new plan |
 | `add_bucket` | Add a bucket to a plan |
+| `add_sprint` | Add a sprint (name + start + finish) to a plan |
 | `start_change_session` | Open a change session; returns `operationSetId` |
-| `add_tasks` | Add tasks — ergonomic, **preferred** |
+| `add_tasks` | Add tasks (+ checklist, sprint, labels, assignees) — ergonomic, **preferred** |
 | `add_tasks_batch` | Add tasks — raw OData, advanced escape hatch |
 | `update_tasks` | Update tasks — ergonomic, **preferred** |
 | `update_tasks_batch` | Update tasks — raw OData, advanced escape hatch |
@@ -97,6 +99,7 @@ means the server is not dangerous even when used from a host with no skill loade
 | `get_plan_tasks_and_buckets` | Full task + bucket list with `summaryTaskIds` |
 | `whoami` | Diagnostic: confirms signed-in user and token |
 | `list_plans` | Recent plans (name, dates, progress, effort) — read |
+| `list_my_tasks` | The signed-in user's tasks across plans (`all`/`overdue`/`active`) — read |
 | `get_plan_summary` | Plan rollup: dates, %, effort, task/milestone/overdue counts — read |
 | `get_task` | One task in full + dependency links + assignments — read |
 | `list_plan_tasks` | Filtered task list (`all` / `overdue` / `milestones`, optional bucket) — read |
@@ -110,9 +113,10 @@ means the server is not dangerous even when used from a host with no skill loade
 `add_tasks` lets the model send a plain task list; the server generates GUIDs,
 resolves bucket names, orders parents-before-children, maps FS/SS/FF/SF link
 types and builds every `@odata.bind`. This cuts tokens and removes a whole class
-of model errors (wrong bind keys, GUID collisions, bad option-set numbers). The
-raw `add_tasks_batch` stays for the long tail (resource assignments, checklists,
-sprints, custom fields).
+of model errors (wrong bind keys, GUID collisions, bad option-set numbers). It
+also carries `checklist`, `sprint`, `labels` (assign existing) and `assignees`
+(project-team members). The raw `add_tasks_batch` stays for the long tail
+(custom fields and entity types `add_tasks` does not model).
 
 ```jsonc
 // add_tasks — what the model writes:
@@ -265,7 +269,7 @@ In your host's remote MCP / OAuth connector settings, provide:
 Set `ENTRA_CLIENT_ID` on the container app to the same client ID so the server pins
 inbound tokens to this app and rejects anything else.
 
-Run **Test connection** — it should list the 23 tools.
+Run **Test connection** — it should list the 25 tools.
 Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
 `create_plan` → `add_bucket` → `start_change_session` → `add_tasks` →
 `apply_changes` → poll `check_change_session_status` until `192350003`
@@ -273,7 +277,7 @@ Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
 
 ## End-to-end acceptance test
 
-The e2e harness connects to the server **through the MCP protocol** (same path any MCP host uses), drives all 23 tools, and writes a markdown report.
+The e2e harness connects to the server **through the MCP protocol** (same path any MCP host uses), drives all 25 tools, and writes a markdown report.
 
 ```bash
 # Minimum — read-only, boots a local server automatically:
@@ -293,7 +297,7 @@ npm run e2e
 ```
 
 The harness:
-- **Phase 0 — Preflight:** confirms all 23 tools are advertised and the delegated token reaches Dataverse (`whoami`).
+- **Phase 0 — Preflight:** confirms all 25 tools are advertised and the delegated token reaches Dataverse (`whoami`).
 - **Phase 1 — Read sweep:** exercises all 8 read/reporting tools and asserts shapes and units (progressPercent 0-100 vs 0-1 fraction, truncated flags, degrade-to-warning arrays).
 - **Phase 2 — Write lifecycle** (`E2E_ALLOW_WRITES=true`): create plan → bucket → open session → `add_tasks` with a 6-level tree + FS dependency → apply → poll until 192350003 → `get_plan_tasks_and_buckets` + independent OData cross-check → second session: `update_tasks` (rename + milestone) → apply → field-level OData verify → cleanup (tasks/buckets deleted, session cancelled).
 - **Phase 3 — Guardrails:** 13 negative tests that must be *rejected* (bad bind alias, blocked-on-create fields, child-before-parent, >200 entities, delete without `confirmed`, whole-plan delete, dependency update, progress out-of-range, cycle detection, etc.).
@@ -311,7 +315,7 @@ Known gaps and planned improvements. Contributions welcome.
 
 - **`list_plan_tasks` — extended optional fields.** `remainingEffortHours`, `durationHours`, `actualStart`, `actualFinish` are absent from the list response. They exist only on Project Operations tenants (not basic Planner Premium) and require a try-with-fallback pattern on a paged collection query (the single-entity `get_task` already does this). Implement the same graceful degrade for `list_plan_tasks`.
 
-- **`list_dependencies` — environment availability.** On some tenants `msdyn_projecttaskdependency` is not exposed (returns 404, degraded to empty list + warning). No known workaround; investigate whether a different query path surfaces the data.
+- ~~**`list_dependencies` — environment availability.**~~ *Resolved.* The earlier 404 was a wrong entity-set name: the read tools queried `msdyn_projecttaskdependency` (singular) and `msdyn_linklagduration`, neither of which exists. Fixed to the plural set `msdyn_projecttaskdependencies` and the real lag column `msdyn_projecttaskdependencylinklag` (in `list_dependencies` and `get_task`). The 404 graceful-degrade path is kept for genuinely unsupported tenants.
 
 - **`describe_option_set` — link-type value range varies by tenant.** The server's hard-coded `LINK_TYPE_VALUES` uses the 192350000-range (standard tenants) or 0-3 (EU/CRM4, controlled by `DATAVERSE_LINK_TYPE_STYLE`). Consider resolving the correct values at runtime via `describe_option_set` at boot rather than requiring an env var.
 
@@ -321,11 +325,15 @@ Known gaps and planned improvements. Contributions welcome.
 
 - **Task reparenting.** `update_tasks` does not support changing a task's parent (`msdyn_parenttask@odata.bind`). Whether PSS honours a parent change on update is unconfirmed live — needs an e2e test. If supported, add a `parent` field (ref or GUID) to `update_tasks`.
 
-- **Sprint assignment.** Neither `add_tasks` nor `update_tasks` supports assigning a task to a sprint (`msdyn_projectsprint@odata.bind`). Accessible via the raw `add_tasks_batch` / `update_tasks_batch` escape hatches.
+- ~~**Sprint assignment.**~~ *Done.* `add_sprint` creates a sprint; `add_tasks` accepts `sprint` (name or sprintId) and sets the task's `msdyn_projectsprint` lookup.
 
-- **Resource assignments.** Creating or removing resource assignments (`msdyn_resourceassignment`) is not supported. These are separate entities that go through PSS create/delete; they could be added as a new tool or as an extension to `add_tasks`.
+- ~~**Resource assignments.**~~ *Done.* `add_tasks` accepts `assignees` (project-team member name or teamMemberId, resolved against `msdyn_projectteam`) and creates `msdyn_resourceassignment` rows. `start`/`finish` are blocked on create (PSS derives them from the task).
+
+- **Checklists** are supported via `add_tasks` `checklist`. **Labels**: `add_tasks` `labels` *assigns* existing plan labels, but label **creation** is UI-only — `msdyn_projectlabel` rejects both direct OData create ("edit through the Project UI") and PSS create. Unknown labels are skipped with a warning.
 
 - **Milestone flag.** `msdyn_ismilestone` is engine-managed and rejected by PSS on both create and update (`ScheduleAPI-AV-0002`). No API path is currently known. Investigate whether a different Dataverse action exposes it; otherwise this remains UI-only.
+
+- **Task comments — out of scope (Teams-backed).** Project/Planner Premium task comments are not stored in Dataverse: `msdyn_projecttaskconversation` holds only a Teams pointer (`msdyn_teamschannelid` + `msdyn_teamsconversationid`), with the comment text in Microsoft Teams. Reading/writing real comments would require a **Microsoft Graph** (Teams) integration with its own scopes and a second token, which breaks this server's single-token, Dataverse-only design. Dataverse Notes (`annotation`, `HasNotes: True` on tasks) are a possible *parallel* notes store, but they do not appear as comments in the Planner/Project UI.
 
 ### Infrastructure
 

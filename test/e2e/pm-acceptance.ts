@@ -386,33 +386,30 @@ async function main(): Promise<void> {
     });
   }
   rec({ phase: "A", name: `skip ${skippedSummaryDeps} summary-linked dependencies (PSS rejects links on summary tasks)`, tool: "—", status: "info", latencyMs: 0, evidence: `${createableDeps.length} leaf-to-leaf deps are createable; ${skippedSummaryDeps} touch a summary task` });
-  // Create deps in small sessions (one apply per chunk; the 200-cap is per
-  // operation set). On a chunk-apply failure, retry that chunk one dependency at
-  // a time so a single bad link can't sink the whole batch — and we learn exactly
-  // which links PSS refuses, and why. This is the "run what is able to run" path.
-  const DEP_CHUNK = 50;
-  const depChunks = chunk(depRecords, DEP_CHUNK);
-  await step("A", `create ${depRecords.length} dependencies (fallback-isolating)`, "add_tasks_batch", async () => {
-    for (const dc of depChunks) {
-      try {
-        const os = await startSession(ctx, projectId, "deps");
-        await mc(ctx, "add_tasks_batch", { operationSetId: os, entities: dc.map((r) => r.entity) });
-        await applyOps(ctx, os);
-        for (const r of dc) { createdDepCount++; dependencyIds.push(r.entity.msdyn_projecttaskdependencyid); }
-      } catch {
-        // Isolate: retry each dependency in the failed chunk on its own.
-        for (const r of dc) {
-          try {
-            const os = await startSession(ctx, projectId, "dep-1");
-            await mc(ctx, "add_tasks_batch", { operationSetId: os, entities: [r.entity] });
-            await applyOps(ctx, os);
-            createdDepCount++; dependencyIds.push(r.entity.msdyn_projecttaskdependencyid);
-          } catch (e) {
-            failedDeps.push({ pred: r.pred, succ: r.succ, error: errMsg(e) });
-          }
-        }
+  // Create deps in batches; a single bad link sinks its whole PSS operation set,
+  // so on failure BISECT the batch (split in half, recurse) to isolate the bad
+  // link(s) with O(failures · log n) applies instead of one-by-one. This both
+  // creates every valid link and pinpoints exactly which PSS refuses, and why —
+  // the "run what is able to run" path, but fast even when failures are dense.
+  async function createDepBatch(recs: DepRec[]): Promise<void> {
+    if (recs.length === 0) return;
+    try {
+      const os = await startSession(ctx, projectId, "deps");
+      await mc(ctx, "add_tasks_batch", { operationSetId: os, entities: recs.map((r) => r.entity) });
+      await applyOps(ctx, os);
+      for (const r of recs) { createdDepCount++; dependencyIds.push(r.entity.msdyn_projecttaskdependencyid); }
+    } catch (e) {
+      if (recs.length === 1) {
+        failedDeps.push({ pred: recs[0].pred, succ: recs[0].succ, error: errMsg(e) });
+        return;
       }
+      const mid = Math.floor(recs.length / 2);
+      await createDepBatch(recs.slice(0, mid));
+      await createDepBatch(recs.slice(mid));
     }
+  }
+  await step("A", `create ${depRecords.length} dependencies (bisect-isolating)`, "add_tasks_batch", async () => {
+    for (const dc of chunk(depRecords, TASK_BATCH)) await createDepBatch(dc);
     if (failedDeps.length) {
       rec({ phase: "A", name: `${failedDeps.length} dependencies refused by PSS (isolated)`, tool: "add_tasks_batch", status: "info", latencyMs: 0, evidence: failedDeps.slice(0, 3).map((f) => `#${f.pred}->#${f.succ}: ${f.error.slice(0, 60)}`).join(" | ") });
     }
