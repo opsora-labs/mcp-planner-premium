@@ -1,7 +1,16 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvErrorMessage, assertGuid, isGuid } from "../dataverse.js";
-import { pageAll, readHeaders, nowIso, decodeDataverseText, type RawTask } from "./readHelpers.js";
+import {
+  pageAll,
+  readHeaders,
+  nowIso,
+  decodeDataverseText,
+  clampLimit,
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  type RawTask,
+} from "./readHelpers.js";
 import {
   getExtendedTaskFieldsCapability,
   setExtendedTaskFieldsCapability,
@@ -35,7 +44,11 @@ export const listPlanTasks: ToolDef = {
   name: "list_plan_tasks",
   title: "List Plan Tasks (filtered)",
   description:
-    "Lists a plan's tasks filtered by 'all', 'overdue' or 'milestones', optionally scoped to one bucket. 'overdue' = leaf tasks past their finish date and under 100% (summary/parent tasks are excluded - their dates roll up from children). For the full task+bucket dump use get_plan_tasks_and_buckets. If truncated=true the list is incomplete.",
+    "Lists a plan's tasks filtered by 'all', 'overdue' or 'milestones', optionally scoped to one bucket. 'overdue' = leaf tasks past their finish date and under 100% (summary/parent tasks are excluded - their dates roll up from children). Returns up to `limit` tasks (default " +
+    DEFAULT_PAGE_SIZE +
+    ", max " +
+    MAX_PAGE_SIZE +
+    ") with a `nextPageToken` when more match - page through with pageToken to read them all without overloading context (totalMatched is the full match count). For efficient bulk paging of every task prefer get_plan_tasks_and_buckets. If truncated=true the underlying scan hit the 10,000-row cap and the list is incomplete.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     filter: z
@@ -45,11 +58,29 @@ export const listPlanTasks: ToolDef = {
         "Which tasks to return: 'all', 'overdue' (leaf tasks past finish and under 100%, excludes summary tasks), or 'milestones'. Default 'all'.",
       ),
     bucketId: z.string().optional().describe("Optional bucketId GUID to scope to one bucket."),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        "Max tasks to return in this page (default " +
+          DEFAULT_PAGE_SIZE +
+          ", max " +
+          MAX_PAGE_SIZE +
+          "). Page with pageToken.",
+      ),
+    pageToken: z
+      .string()
+      .optional()
+      .describe("Opaque cursor from a previous call's nextPageToken; omit for the first page."),
   },
   handler: async (input: {
     projectId: string;
     filter?: "all" | "overdue" | "milestones";
     bucketId?: string;
+    limit?: number;
+    pageToken?: string;
   }) => {
     const BASE = getApiBase();
     const projectId = assertGuid(input.projectId, "projectId");
@@ -180,14 +211,37 @@ export const listPlanTasks: ToolDef = {
       }),
     }));
 
+    // Bound the response to `limit` rows with an offset cursor. The internal scan
+    // already read every matching row (needed for the overdue/summary logic); this
+    // only caps what is RETURNED so the payload stays within the model's context
+    // budget. pageToken is a private numeric offset, never a URL — SSRF-irrelevant.
+    const limit = clampLimit(input.limit);
+    let offset = 0;
+    if (input.pageToken) {
+      const raw = Buffer.from(input.pageToken, "base64url").toString("utf8");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0 || n > 10_000_000)
+        throw new Error("Invalid pageToken.");
+      offset = n;
+    }
+    const pageTasks = tasks.slice(offset, offset + limit);
+    const nextOffset = offset + limit;
+    const nextPageToken =
+      nextOffset < tasks.length
+        ? Buffer.from(String(nextOffset), "utf8").toString("base64url")
+        : undefined;
+
     return {
       ok: true,
       projectId,
       filter,
-      count: tasks.length,
+      count: pageTasks.length,
+      totalMatched: tasks.length,
+      pageLimit: limit,
+      nextPageToken,
       truncated: paged.truncated,
       warnings: toolWarnings,
-      tasks,
+      tasks: pageTasks,
     };
   },
 };

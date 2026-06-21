@@ -172,3 +172,85 @@ export function readHeaders(): Record<string, string> {
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// Cursor-based pagination — bounded reads that keep large plans within the
+// model's context budget. The pageToken is an OPAQUE base64url wrapper around
+// the Dataverse $skiptoken cursor — NEVER a caller-supplied URL — and is
+// re-attached as an ENCODED query value on the same env-fixed URL, so tool
+// input can never select a host or path (SSRF stays closed).
+// ---------------------------------------------------------------------------
+
+/** Default / maximum page size for bounded reads. */
+export const MAX_PAGE_SIZE = 1000;
+export const DEFAULT_PAGE_SIZE = 1000;
+
+/** Clamp a caller-supplied limit into [1, MAX_PAGE_SIZE]; undefined -> default. */
+export function clampLimit(limit: unknown): number {
+  if (limit === undefined || limit === null) return DEFAULT_PAGE_SIZE;
+  const n = Number(limit);
+  if (!Number.isFinite(n)) return DEFAULT_PAGE_SIZE;
+  return Math.max(1, Math.min(MAX_PAGE_SIZE, Math.floor(n)));
+}
+
+/** Wrap a Dataverse @odata.nextLink's $skiptoken into an opaque page token. */
+export function encodePageToken(nextLink: string | null | undefined): string | undefined {
+  if (!nextLink) return undefined;
+  try {
+    const sk = new URL(nextLink).searchParams.get("$skiptoken");
+    if (!sk) return undefined;
+    return Buffer.from(sk, "utf8").toString("base64url");
+  } catch {
+    return undefined;
+  }
+}
+
+/** Decode an opaque page token back to its $skiptoken value. Throws on bad input. */
+export function decodePageToken(token: string): string {
+  if (typeof token !== "string" || token.length === 0 || token.length > 8192)
+    throw new Error("Invalid pageToken.");
+  const raw = Buffer.from(token, "base64url").toString("utf8");
+  // A real skiptoken is a short paging cookie. Reject anything URL-like or
+  // implausibly large — defense in depth against query/host injection.
+  if (!raw || raw.length > 4096 || /^https?:\/\//i.test(raw))
+    throw new Error("Invalid pageToken.");
+  return raw;
+}
+
+/** Read-only headers that clamp the server page size to `limit` rows. */
+export function pageHeaders(limit: number): Record<string, string> {
+  const n = Math.max(1, Math.min(MAX_PAGE_SIZE, Math.floor(limit)));
+  return dvHeaders({
+    extra: {
+      Prefer: `odata.maxpagesize=${n},odata.include-annotations="OData.Community.Display.V1.FormattedValue"`,
+    },
+  });
+}
+
+export interface PageResult {
+  rows: any[];
+  nextPageToken?: string;
+}
+
+/**
+ * Fetches ONE page (up to `limit` rows) of an OData collection. SSRF-safe: the
+ * skiptoken cursor is re-attached as an ENCODED query value on the env-fixed
+ * `firstUrl`; a caller's pageToken never selects host or path.
+ */
+export async function pageOnce(
+  firstUrl: string,
+  limit: number,
+  pageToken?: string,
+): Promise<PageResult> {
+  let url = firstUrl;
+  if (pageToken) {
+    const sk = decodePageToken(pageToken);
+    url += (url.includes("?") ? "&" : "?") + "$skiptoken=" + encodeURIComponent(sk);
+  }
+  const res = await dvReq({ url, method: "GET", headers: pageHeaders(limit) }, { retry: true });
+  if (res.status >= 400)
+    throw new Error("read failed (" + res.status + "): " + dvErrorMessage(res));
+  const rows = res.json?.value || [];
+  const nextPageToken = encodePageToken(res.json?.["@odata.nextLink"]);
+  return { rows, nextPageToken };
+}
