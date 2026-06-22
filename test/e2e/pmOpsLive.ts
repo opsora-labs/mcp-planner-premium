@@ -147,10 +147,10 @@ async function ensureSprint(projectId: string): Promise<void> {
 
 /** Build-or-reuse the LARGE board from the fixture (resumable; kept). */
 async function ensureLargeBoard(fixture: Fixture): Promise<Board> {
+  setPhase(`Build at scale — ${fixture.taskCount}-task it-planner-board (kept)`);
   const cfg = getConfig();
   const planName = process.env.SEED_PLAN_NAME || "ZZ-MCP-SEED-itboard";
   const linkStyle = (process.env.DATAVERSE_LINK_TYPE_STYLE === "global" ? "global" : "eu") as "eu" | "global";
-  const t0 = Date.now();
   const ctx: BuildCtx = {
     call,
     orgUrl: cfg.DATAVERSE_ORG_URL,
@@ -166,19 +166,18 @@ async function ensureLargeBoard(fixture: Fixture): Promise<Board> {
     },
     forceRebuild: /^(1|true)$/i.test(process.env.REBUILD_SEED || ""),
     log: (m) => console.log(`  · ${m}`),
+    onStep: (step, tool, ms, ev) => {
+      rows.push({ phase: curPhase, status: "pass", step, tool, latencyMs: ms, evidence: ev });
+      console.log(`  ✅ ${step}${ev ? ` — ${ev}` : ""}`);
+    },
   };
   const cache = await buildOrReuseSeed(ctx, fixture);
   const projectId = cache.projectId!;
   await ensureSprint(projectId);
   const count = await verifyTaskCount(projectId, BEARER);
   const bucketNames = Object.keys(cache.buckets);
-  check(
-    `build/reuse large board from fixture (${fixture.taskCount}-task it-planner-board)`,
-    "seed builder",
-    Date.now() - t0,
-    count.count >= fixture.taskCount,
-    `${count.count} tasks · ${bucketNames.length} buckets · ${cache.dependencyIds.length} deps · ${cache.checkpoint.failedDeps.length} PSS-refused`,
-  );
+  check("board verified via independent OData — all tasks present", "verifyTaskCount", 0, count.count >= fixture.taskCount,
+    `${count.count} tasks · ${bucketNames.length} buckets · ${cache.dependencyIds.length} deps · ${cache.checkpoint.failedDeps.length} PSS-refused`);
   return { projectId, buckets: { ...cache.buckets }, bucketNames, sprintName: SPRINT, name: planName, taskCount: count.count };
 }
 
@@ -341,7 +340,13 @@ async function main(): Promise<void> {
       summaryTaskId = (contents.summaryTaskIds ?? [])[0] ?? "";
       spotTaskId = contents.tasks?.[0]?.taskId ?? "";
       const maxLevel = Math.max(0, ...(contents.tasks ?? []).map((x: any) => x.outlineLevel ?? 0));
-      check("get_plan_tasks_and_buckets — hierarchy + summary tasks", "get_plan_tasks_and_buckets", Date.now() - t, (contents.summaryTaskIds?.length ?? 0) > 0, `${contents.taskCount} tasks, ${contents.summaryTaskIds?.length ?? 0} summaries, max level ${maxLevel}`);
+      check("get_plan_tasks_and_buckets — full task tree returned", "get_plan_tasks_and_buckets", Date.now() - t, (contents.tasks?.length ?? 0) === board.taskCount, `${contents.taskCount} tasks`);
+      check("hierarchy depth (multi-level)", "get_plan_tasks_and_buckets", 0, maxLevel >= 3, `max outline level ${maxLevel}`);
+      check("summary (parent) tasks present", "get_plan_tasks_and_buckets", 0, (contents.summaryTaskIds?.length ?? 0) > 0, `${contents.summaryTaskIds?.length ?? 0} summaries`);
+
+      t = Date.now();
+      const lpt = await call("list_plan_tasks", { projectId, filter: "all", limit: 1000 });
+      check("list_plan_tasks — all tasks == total", "list_plan_tasks", Date.now() - t, lpt.totalMatched === board.taskCount, `${lpt.totalMatched} tasks`);
 
       if (spotTaskId) {
         t = Date.now();
@@ -357,6 +362,13 @@ async function main(): Promise<void> {
     check("create scratch subtree (parent + 3 leaves + FS dep)", "add_tasks", Date.now() - t, scratchIds.every(Boolean));
 
     setPhase("PM operations (verified via independent OData)");
+
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: scratch.leaves.map((id) => ({ taskId: id, progressPercent: 100 })) })));
+    {
+      const pp = await verifyTaskField(scratch.parent, "msdyn_progress", BEARER);
+      check("progress rollup — children → 100%, parent recalculates", "update_tasks", Date.now() - t, typeof pp === "number" && pp >= 0.99, `parent progress = ${Math.round((Number(pp) || 0) * 100)}%`);
+    }
 
     t = Date.now();
     await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], bucket: bkB }] })));
@@ -379,6 +391,10 @@ async function main(): Promise<void> {
       const fin = await verifyTaskField(scratch.leaves[2], "msdyn_finish", BEARER);
       check("reschedule a task's finish date + priority", "update_tasks", Date.now() - t, typeof fin === "string" && /2026-09-1[45]/.test(fin), `finish = ${String(fin).slice(0, 10)}`);
     }
+
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[1], priority: 9 }] })));
+    check("re-prioritise a task (→ 9 Low)", "update_tasks", Date.now() - t, Number(await verifyTaskField(scratch.leaves[1], "msdyn_priority", BEARER)) === 9, "priority = 9");
 
     t = Date.now();
     {
@@ -407,6 +423,18 @@ async function main(): Promise<void> {
     check(`bulk move (2 tasks → ${bkC}, one operation set)`, "update_tasks", Date.now() - t,
       lc(await verifyTaskField(scratch.parent, "_msdyn_projectbucket_value", BEARER)) === lc(board.buckets[bkC]), "both re-bucketed");
 
+    let subId = "";
+    t = Date.now();
+    await inSession(projectId, async (op) => {
+      const r = await call("add_tasks", { operationSetId: op, projectId, tasks: [{ ref: "SUB", subject: "New sub-task", bucket: bkA, parent: scratch.parent }] });
+      subId = r.taskRefs?.SUB ?? "";
+    });
+    check("add a sub-task under an existing task", "add_tasks", Date.now() - t, !!subId && lc(await verifyTaskField(subId, "_msdyn_parenttask_value", BEARER)) === lc(scratch.parent), "child of scratch parent");
+
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("delete_tasks_batch", { operationSetId: op, projectId, taskIds: [subId], confirmed: true })));
+    check("delete the sub-task (confirmed gate)", "delete_tasks_batch", Date.now() - t, await verifyTaskDeleted(subId, BEARER), "task removed (OData 404)");
+
     info("not supported by the API (confirmed): reorder within a bucket, move to another plan, edit a dependency in place", "—",
       "PSS manages display order; cross-plan move + in-place dependency edits have no API path (delete + recreate)");
 
@@ -429,6 +457,26 @@ async function main(): Promise<void> {
       const badg = await mcpCall(URL_, "update_tasks", { operationSetId: s1.operationSetId, projectId, tasks: [{ taskId: "not-a-guid", subject: "x" }] }, BEARER);
       check("invalid GUID rejected", "update_tasks", Date.now() - t, badg.isError === true && /guid/i.test(JSON.stringify(badg.content)), "GUID validation");
 
+      const bid = board!.buckets[bkA];
+      t = Date.now();
+      const badBind = await mcpCall(URL_, "add_tasks_batch", { operationSetId: s1.operationSetId, entities: [{
+        "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttask", msdyn_projecttaskid: "aaaaaaaa-1111-2222-3333-444444444444",
+        msdyn_subject: "bad bind", "msdyn_project@odata.bind": `/msdyn_projects(${projectId})`,
+        "msdyn_bucket@odata.bind": `/msdyn_projectbuckets(${bid})`,
+      }] }, BEARER);
+      check("bad bind alias rejected (teaches the right key)", "add_tasks_batch", Date.now() - t, badBind.isError === true && /msdyn_projectbucket@odata\.bind|navigation property/i.test(JSON.stringify(badBind.content)), "wrong @odata.bind caught");
+
+      t = Date.now();
+      const pac = await mcpCall(URL_, "add_tasks_batch", { operationSetId: s1.operationSetId, entities: [
+        { "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttask", msdyn_projecttaskid: "bbbbbbbb-1111-2222-3333-444444444444", msdyn_subject: "child", "msdyn_project@odata.bind": `/msdyn_projects(${projectId})`, "msdyn_projectbucket@odata.bind": `/msdyn_projectbuckets(${bid})`, "msdyn_parenttask@odata.bind": "/msdyn_projecttasks(cccccccc-1111-2222-3333-444444444444)" },
+        { "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttask", msdyn_projecttaskid: "cccccccc-1111-2222-3333-444444444444", msdyn_subject: "parent", "msdyn_project@odata.bind": `/msdyn_projects(${projectId})`, "msdyn_projectbucket@odata.bind": `/msdyn_projectbuckets(${bid})` },
+      ] }, BEARER);
+      check("parent-after-child ordering rejected", "add_tasks_batch", Date.now() - t, pac.isError === true && /before|parent|child|order/i.test(JSON.stringify(pac.content)), "parents-before-children enforced");
+
+      t = Date.now();
+      const nd = await mcpCall(URL_, "update_tasks", { operationSetId: s1.operationSetId, projectId, tasks: [{ taskId: spotTaskId || summaryTaskId, start: null }] }, BEARER);
+      check("null date on update rejected (input validation)", "update_tasks", Date.now() - t, nd.isError === true, "null date refused at boundary");
+
       if (summaryTaskId) {
         t = Date.now();
         const sum = await mcpCall(URL_, "update_tasks", { operationSetId: s1.operationSetId, projectId, tasks: [{ taskId: summaryTaskId, finish: "2027-12-31T00:00:00Z" }] }, BEARER);
@@ -443,6 +491,10 @@ async function main(): Promise<void> {
       const team = await call("list_team_members", { projectId });
       const member = (team.members ?? team.teamMembers ?? [])[0];
       check("list_team_members (plan auto-includes the creator)", "list_team_members", Date.now() - t, !!member?.name, member?.name ?? "n/a");
+
+      t = Date.now();
+      const sp = await call("add_sprint", { projectId, name: `Sprint-${Date.now().toString().slice(-6)}`, start: "2026-10-01", finish: "2026-10-14" });
+      check("add_sprint creates a sprint", "add_sprint", Date.now() - t, sp?.ok === true || !!sp?.sprintId, sp?.sprintId ? String(sp.sprintId).slice(0, 8) : "created");
 
       t = Date.now();
       await inSession(projectId, async (op) => {

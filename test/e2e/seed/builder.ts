@@ -52,6 +52,8 @@ export interface BuildCtx {
   probeTaskCount: (projectId: string) => Promise<number | null>;
   forceRebuild?: boolean;
   log?: (m: string) => void;
+  /** Reports each build sub-step so the caller can record it in the report. */
+  onStep?: (step: string, tool: string, ms: number, evidence: string) => void;
 }
 
 const cachePath = () => resolve(process.cwd(), ".e2e-seed-cache.json");
@@ -121,31 +123,40 @@ export async function buildOrReuseSeed(ctx: BuildCtx, fixture: Fixture): Promise
   }
   const decision = validateSeedCache(cache, fixture, probe, ctx.orgUrl, ctx.forceRebuild).decision;
   log(`seed decision: ${decision}`);
-  if (decision === "reuse" && cache) return cache;
+  if (decision === "reuse" && cache) {
+    ctx.onStep?.("reuse kept board (cache hit — not rebuilt)", "list_plans", 0, `${probe.liveTaskCount ?? cache.fixtureTaskCount} tasks`);
+    return cache;
+  }
   if (decision === "rebuild" || !cache) cache = freshCache(ctx, fixture);
 
   // ── Plan ──
   if (!cache.projectId) {
+    const t0 = Date.now();
     const r = await ctx.call("create_plan", { subject: cache.seedPlanName, description: "PM-ops seed board (kept)" });
     cache.projectId = r.projectId;
     cache.checkpoint.phase = "plan";
     await writeCache(cache);
     log(`created plan ${cache.projectId}`);
+    ctx.onStep?.("create_plan — kept seed plan", "create_plan", Date.now() - t0, String(cache.projectId));
   }
   const projectId = cache.projectId;
 
   // ── Buckets (incl. a default for unbucketed fixture tasks) ──
   const bucketNames = new Set<string>();
   for (const t of fixture.tasks) bucketNames.add(t.bucket && t.bucket.trim() ? t.bucket.trim() : NULL_BUCKET);
+  const tB = Date.now();
+  let bucketsCreated = 0;
   for (const name of bucketNames) {
     if (!cache.buckets[name]) {
       cache.buckets[name] = (await ctx.call("add_bucket", { projectId, name })).bucketId;
+      bucketsCreated++;
       await writeCache(cache);
     }
   }
   cache.checkpoint.phase = "buckets";
   await writeCache(cache);
   log(`buckets ready (${Object.keys(cache.buckets).length})`);
+  if (bucketsCreated > 0) ctx.onStep?.(`create ${bucketsCreated} buckets`, "add_bucket", Date.now() - tB, `${Object.keys(cache.buckets).length} total`);
 
   // ── Tasks, roots-first, level-by-level with explicit parent GUIDs ──
   const parentOf = new Map<number, number | null>();
@@ -172,6 +183,7 @@ export async function buildOrReuseSeed(ctx: BuildCtx, fixture: Fixture): Promise
         if (typeof it.priority === "number") t.priority = it.priority;
         return t;
       });
+    const tT = Date.now();
     await applySession(ctx, projectId, async (opSet) => {
       const r = await ctx.call("add_tasks", { operationSetId: opSet, projectId, tasks });
       for (const [ref, guid] of Object.entries(r.taskRefs as Record<string, string>)) {
@@ -185,13 +197,15 @@ export async function buildOrReuseSeed(ctx: BuildCtx, fixture: Fixture): Promise
     cache.checkpoint.tasksPersisted = Object.keys(cache.taskGuidByNumber).length;
     await writeCache(cache);
     log(`tasks L${batch.level}.${batch.batchIndex}: +${tasks.length} (${cache.checkpoint.tasksPersisted} total)`);
+    ctx.onStep?.(`create L${batch.level} tasks (${tasks.length})`, "add_tasks", Date.now() - tT, `${cache.checkpoint.tasksPersisted} total`);
   }
 
   // ── Dependencies (leaf-only) with bisect-on-failure ──
   // Resumable: skip pairs already created (cache.dependencyPairs) and pairs PSS
   // permanently refused (failedDeps). A transient drop aborts and resumes.
   if (!cache.checkpoint.depsPhaseDone) {
-    const { deps } = planDependencyBatches(fixture, DEFAULT_BATCH_SIZE);
+    const tD = Date.now();
+    const { deps, skippedSummaryDeps } = planDependencyBatches(fixture, DEFAULT_BATCH_SIZE);
     const createdPairs = new Set(cache.dependencyPairs ?? []);
     const failedPairs = new Set(cache.checkpoint.failedDeps.map((f) => `${f.pred}:${f.succ}`));
     const remaining = deps.filter(
@@ -205,10 +219,12 @@ export async function buildOrReuseSeed(ctx: BuildCtx, fixture: Fixture): Promise
     cache.checkpoint.phase = "deps";
     await writeCache(cache);
     log(`deps complete: ${cache.dependencyIds.length} created, ${cache.checkpoint.failedDeps.length} PSS-refused`);
+    ctx.onStep?.("create leaf-to-leaf dependencies (bisect-isolating)", "add_tasks_batch", Date.now() - tD, `${cache.dependencyIds.length} created, ${cache.checkpoint.failedDeps.length} PSS-refused, ${skippedSummaryDeps} summary-linked skipped`);
   }
 
   // ── Leaf progress ──
   if (!cache.checkpoint.progressPhaseDone) {
+    const tP = Date.now();
     const items = planProgressItems(fixture);
     let done = 0;
     for (const c of chunk(items, DEFAULT_BATCH_SIZE)) {
@@ -227,6 +243,7 @@ export async function buildOrReuseSeed(ctx: BuildCtx, fixture: Fixture): Promise
     cache.checkpoint.phase = "progress";
     await writeCache(cache);
     log(`progress set on ${done} leaf tasks`);
+    ctx.onStep?.(`set progress on ${done} leaf tasks`, "update_tasks", Date.now() - tP, `${done} leaf tasks updated`);
   }
 
   cache.checkpoint.phase = "complete";
