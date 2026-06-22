@@ -68,11 +68,15 @@ async function bootServer(port: number): Promise<Server> {
 
 let URL_ = "";
 let BEARER = "";
-const TRANSIENT = /fetch failed|did not respond|ETIMEDOUT|EHOSTUNREACH|ECONNRESET|socket|ENOTFOUND|network/i;
+// Retriable: connection blips AND Dataverse service-protection throttling ("Too
+// many requests" / 429) — the latter is request-rate based, not network, and just
+// needs a back-off. A "fetch failed" means the server never reached Dataverse, so
+// re-issuing is safe.
+const TRANSIENT = /fetch failed|did not respond|ETIMEDOUT|EHOSTUNREACH|ECONNRESET|socket|ENOTFOUND|network|too many requests|\b429\b|throttl|service protection/i;
+const THROTTLE = /too many requests|\b429\b|throttl|service protection/i;
 
-/** mcpCall with retry on TRANSIENT network failures (airplane wifi drops mid-call;
- * a "fetch failed" means the server never reached Dataverse, so re-issuing is safe). */
-async function call(tool: string, args: Record<string, unknown>, attempts = 4): Promise<any> {
+/** mcpCall with retry + back-off on transient errors and Dataverse throttling. */
+async function call(tool: string, args: Record<string, unknown>, attempts = 6): Promise<any> {
   let lastErr: unknown;
   for (let i = 1; i <= attempts; i++) {
     try {
@@ -81,7 +85,7 @@ async function call(tool: string, args: Record<string, unknown>, attempts = 4): 
         const msg = JSON.stringify(r.content);
         if (TRANSIENT.test(msg) && i < attempts) {
           lastErr = new Error(msg);
-          await new Promise((res) => setTimeout(res, 2500));
+          await new Promise((res) => setTimeout(res, THROTTLE.test(msg) ? Math.min(20000, 5000 * i) : 2500));
           continue;
         }
         throw new Error(`${tool} isError: ${msg.slice(0, 200)}`);
@@ -91,7 +95,7 @@ async function call(tool: string, args: Record<string, unknown>, attempts = 4): 
       lastErr = e;
       const msg = e instanceof Error ? e.message : String(e);
       if (TRANSIENT.test(msg) && i < attempts) {
-        await new Promise((res) => setTimeout(res, 2500));
+        await new Promise((res) => setTimeout(res, THROTTLE.test(msg) ? Math.min(20000, 5000 * i) : 2500));
         continue;
       }
       throw e;

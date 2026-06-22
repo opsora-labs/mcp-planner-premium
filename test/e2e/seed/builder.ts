@@ -37,9 +37,10 @@ const LINK_TYPE: Record<"eu" | "global", Record<string, number>> = {
   eu: { FS: 1, SS: 3, FF: 0, SF: 2 },
 };
 const NULL_BUCKET = "(General)";
-// A transient network failure must NOT be mistaken for a permanent PSS dep
-// rejection — it aborts the build (so it resumes) instead of marking deps failed.
-const TRANSIENT = /fetch failed|did not respond|ETIMEDOUT|EHOSTUNREACH|ECONNRESET|socket|ENOTFOUND|network/i;
+// A transient failure (connection blip OR Dataverse throttling) must NOT be
+// mistaken for a permanent PSS dep rejection — it aborts the build (so it resumes)
+// instead of marking deps failed. Throttling is request-rate based, not network.
+const TRANSIENT = /fetch failed|did not respond|ETIMEDOUT|EHOSTUNREACH|ECONNRESET|socket|ENOTFOUND|network|too many requests|\b429\b|throttl|service protection/i;
 
 export type CallFn = (tool: string, args: Record<string, unknown>) => Promise<any>;
 
@@ -103,6 +104,9 @@ async function applySession(ctx: BuildCtx, projectId: string, mutate: (opSet: st
   try {
     await mutate(s.operationSetId);
     await ctx.call("apply_changes", { operationSetId: s.operationSetId });
+    // Pace PSS operations so the rapid dep-bisect does not trip Dataverse's
+    // service-protection (throttling) limits.
+    await new Promise((r) => setTimeout(r, 400));
   } catch (e) {
     try {
       await ctx.call("cancel_change_session", { operationSetId: s.operationSetId });
