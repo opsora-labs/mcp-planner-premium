@@ -95,8 +95,8 @@ means the server is not dangerous even when used from a host with no skill loade
 | `check_change_session_status` | Poll a session (or list open sessions) |
 | `cancel_change_session` | Abandon a change session |
 | `find_plan_by_name` | Resolve a plan by name |
-| `find_team_member` | Resolve a team member by name for one plan — returns `bookableResourceId` + UPN/email/full name |
-| `find_team_member_across_plans` | Find a person by name across **all** plans at once; groups by person with UPN/email and the plans they're on — read |
+| `find_team_member` | Resolve a team member by name **and/or email/UPN** for one plan — matches the resolved identity (full name/email), not just the team-row label; returns `bookableResourceId` + UPN/email/full name |
+| `find_team_member_across_plans` | Find a person by name **and/or email/UPN** across **all** plans at once; matches resolved identity; groups by person with UPN/email and the plans they're on — read |
 | `get_plan_tasks_and_buckets` | Full task + bucket list with `summaryTaskIds` |
 | `whoami` | Diagnostic: confirms signed-in user and token |
 | `list_plans` | Recent plans (name, dates, progress, effort) — read |

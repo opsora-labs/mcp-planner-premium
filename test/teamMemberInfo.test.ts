@@ -141,16 +141,135 @@ describe("find_team_member_across_plans", () => {
     expect(res.hint).toMatch(/multiple distinct people/i);
   });
 
-  it("rejects an empty name", async () => {
+  it("rejects an empty query (no name and no email)", async () => {
     await expect(
       withBearer(() => (findTeamMemberAcrossPlans.handler as any)({ name: "   " })),
-    ).rejects.toThrow(/name is required/);
+    ).rejects.toThrow(/provide a name/i);
   });
 
   it("returns count 0 with a clear hint when nobody matches", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonRes({ value: [] }));
     const res: any = await withBearer(() => (findTeamMemberAcrossPlans.handler as any)({ name: "Nobody" }));
     expect(res.count).toBe(0);
-    expect(res.hint).toMatch(/no team member matched/i);
+    expect(res.hint).toMatch(/no exact\/partial match|candidates/i);
+  });
+});
+
+// ── The lookup bug this fix targets ────────────────────────────────────────
+// A member whose team-row msdyn_name is blank/null/stale is plainly on the plan
+// (list_team_members shows them via the resolved systemuser identity) but the old
+// server-side contains(msdyn_name,...) filter returned count:0. Matching must use
+// the resolved fullName/email/upn, not just the team-row label.
+describe("team member lookup by identity (regression: blank msdyn_name + email search)", () => {
+  beforeEach(() => {
+    process.env.DATAVERSE_ORG_URL = ORG;
+    process.env.LOG_LEVEL = "silent";
+    process.env.AUTH_MODE = "insecure-passthrough";
+    process.env.DATAVERSE_LINK_TYPE_STYLE = "eu";
+    delete process.env.TENANT_ID;
+    resetEnvCache();
+  });
+  afterEach(() => { vi.restoreAllMocks(); resetEnvCache(); });
+
+  // Team rows whose msdyn_name is null — identity is the ONLY source of the name.
+  function mockBlankNameTeam(extra: Record<string, unknown> = {}) {
+    return vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes("/msdyn_projectteams"))
+        return jsonRes({ value: [
+          { msdyn_projectteamid: "team-a", msdyn_name: null, _msdyn_bookableresourceid_value: RES_A, ...extra },
+        ] });
+      return mockIdentity(url) ?? jsonRes({ value: [] });
+    });
+  }
+
+  it("find_team_member finds a member by name even when msdyn_name is blank", async () => {
+    mockBlankNameTeam();
+    const res: any = await withBearer(() =>
+      (findTeamMember.handler as any)({ projectId: PLAN, name: "Marcin Baluta" }));
+    expect(res.count).toBe(1);
+    expect(res.members[0].bookableResourceId).toBe(RES_A);
+    expect(res.members[0].fullName).toBe("Marcin Baluta");
+    expect(res.members[0].exactMatch).toBe(true);
+  });
+
+  it("find_team_member finds a member by email/UPN", async () => {
+    mockBlankNameTeam();
+    const res: any = await withBearer(() =>
+      (findTeamMember.handler as any)({ projectId: PLAN, email: "marcin.b@opsora.io" }));
+    expect(res.count).toBe(1);
+    expect(res.members[0].bookableResourceId).toBe(RES_A);
+    expect(res.members[0].exactMatch).toBe(true);
+  });
+
+  it("find_team_member requires a name or email", async () => {
+    await expect(
+      withBearer(() => (findTeamMember.handler as any)({ projectId: PLAN })),
+    ).rejects.toThrow(/provide a name/i);
+  });
+
+  it("find_team_member returns candidates + a helpful hint when nothing matches", async () => {
+    mockBlankNameTeam();
+    const res: any = await withBearer(() =>
+      (findTeamMember.handler as any)({ projectId: PLAN, name: "Nobody Here" }));
+    expect(res.count).toBe(0);
+    expect(res.candidates).toHaveLength(1);
+    expect(res.candidates[0].bookableResourceId).toBe(RES_A);
+    expect(res.hint).toMatch(/candidates|list_team_members|email/i);
+  });
+
+  it("find_team_member_across_plans finds a member by name when msdyn_name is blank", async () => {
+    mockBlankNameTeam({ _msdyn_project_value: "plan1" });
+    const res: any = await withBearer(() =>
+      (findTeamMemberAcrossPlans.handler as any)({ name: "Marcin Baluta" }));
+    expect(res.count).toBe(1);
+    expect(res.people[0].bookableResourceId).toBe(RES_A);
+    expect(res.people[0].fullName).toBe("Marcin Baluta");
+    expect(res.people[0].exactMatch).toBe(true);
+  });
+
+  it("find_team_member matches a reordered name via order-independent tokens", async () => {
+    mockBlankNameTeam();
+    const res: any = await withBearer(() =>
+      (findTeamMember.handler as any)({ projectId: PLAN, name: "Baluta Marcin" }));
+    expect(res.count).toBe(1);
+    expect(res.members[0].bookableResourceId).toBe(RES_A);
+    expect(res.members[0].exactMatch).toBe(false);
+    expect(res.members[0].matchType).toBe("partial");
+  });
+
+  it("find_team_member_across_plans returns candidates across plans on a miss", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes("/msdyn_projectteams"))
+        return jsonRes({ value: [
+          { msdyn_projectteamid: "t1", msdyn_name: null, _msdyn_bookableresourceid_value: RES_A, _msdyn_project_value: "plan1" },
+          { msdyn_projectteamid: "t2", msdyn_name: null, _msdyn_bookableresourceid_value: RES_B, _msdyn_project_value: "plan2" },
+        ] });
+      return mockIdentity(url) ?? jsonRes({ value: [] });
+    });
+    const res: any = await withBearer(() =>
+      (findTeamMemberAcrossPlans.handler as any)({ name: "Nonexistent Person" }));
+    expect(res.count).toBe(0);
+    expect(res.candidates).toHaveLength(2); // two distinct people surfaced for AI to pick from
+    expect(res.candidates.map((c: any) => c.fullName).sort()).toEqual(["Marcin Baluta", "Marcin Kowalski"]);
+    expect(res.hint).toMatch(/candidates/i);
+  });
+
+  it("find_team_member_across_plans finds a member by email", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes("/msdyn_projectteams"))
+        return jsonRes({ value: [
+          { msdyn_projectteamid: "t1", msdyn_name: null, _msdyn_bookableresourceid_value: RES_A, _msdyn_project_value: "plan1" },
+          { msdyn_projectteamid: "t2", msdyn_name: null, _msdyn_bookableresourceid_value: RES_B, _msdyn_project_value: "plan1" },
+        ] });
+      return mockIdentity(url) ?? jsonRes({ value: [] });
+    });
+    const res: any = await withBearer(() =>
+      (findTeamMemberAcrossPlans.handler as any)({ email: "marcin.k@opsora.io" }));
+    expect(res.count).toBe(1);
+    expect(res.people[0].bookableResourceId).toBe(RES_B);
+    expect(res.people[0].exactMatch).toBe(true);
   });
 });

@@ -1,103 +1,79 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
-import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
-import { resolveResourceIdentities } from "./identity.js";
+import { assertGuid } from "../dataverse.js";
+import { fetchPlanMembers, memberMatch, type EnrichedMember } from "./teamMemberSearch.js";
 import type { ToolDef } from "./types.js";
 
-// Find Team Member - resolve project team member(s) by display name for ONE plan.
-// Returns teamMemberId (projectteamid) + bookableResourceId for msdyn_resourceassignment,
-// plus the person's UPN / email / full name (resolved via bookable resource → systemuser).
+// Find Team Member - resolve project team member(s) for ONE plan by display name
+// and/or email/UPN. Matches against BOTH the team-row label AND the person's real
+// identity (fullName/email/upn via bookable resource -> systemuser), so a member
+// is found even when the raw team-row name is blank or stale.
 export const findTeamMember: ToolDef = {
   name: "find_team_member",
   title: "Find Team Member",
   description:
-    "Resolves project team members by display name for ONE plan. Returns projectteamid AND bookableresourceid (needed for msdyn_resourceassignment), plus the person's upn, email and fullName (resolved via the bookable resource's systemuser) so you can disambiguate two people with the same display name. Use BEFORE adding assignments. If no team member matches, the person must first be added to the plan in the Planner UI - never guess GUIDs. To search ALL plans at once, use find_team_member_across_plans.",
+    "Resolves project team members for ONE plan by display name and/or email/UPN. Matches against BOTH the team-row name AND the person's real identity (fullName, email, upn resolved via the bookable resource's systemuser), so a member is found even when the raw team-row name is blank or stale. Matching is exact → substring → order-independent tokens (so 'Baluta Marcin' still finds 'Marcin Baluta'); each result carries matchType ('exact'|'partial'). When nothing matches, the response includes a `candidates` list (all members of the plan) so YOU can resolve the harder cases (typos, nicknames, transliteration) and confirm the pick with the user. Returns projectteamid AND bookableresourceid (needed for msdyn_resourceassignment), plus upn/email/fullName so you can disambiguate two people with the same display name. Provide name and/or email (at least one). Use BEFORE adding assignments. Never guess GUIDs - if nobody fits, add the person to the plan in the Planner UI first. To search ALL plans at once, use find_team_member_across_plans.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     name: z
       .string()
-      .describe("Full or partial display name of the team member, e.g. 'Marcin Baluta'."),
+      .optional()
+      .describe("Full or partial display name, e.g. 'Marcin Baluta'. Provide name and/or email."),
+    email: z
+      .string()
+      .optional()
+      .describe(
+        "Email or UPN to match (exact or partial), e.g. 'marcin.baluta@utimaco.com'. Use when name search fails or to disambiguate.",
+      ),
   },
-  handler: async (input: { projectId: string; name: string }) => {
+  handler: async (input: { projectId: string; name?: string; email?: string }) => {
     const BASE = getApiBase();
 
     const projectId = assertGuid(input.projectId, "projectId");
     const name = (input.name || "").trim();
-    if (!name) throw new Error("name is required (full or partial display name).");
-    // Escape single quotes for the OData literal.
-    const safe = name.replace(/'/g, "''");
+    const email = (input.email || "").trim();
+    if (!name && !email)
+      throw new Error("Provide a name and/or email to search for the team member.");
 
-    // NOTE: collection 'msdyn_projectteams' and lookup '_msdyn_bookableresourceid_value' are the
-    // standard Project for the web names; confirm against metadata if this environment differs.
-    const url =
-      BASE +
-      "/msdyn_projectteams?$select=msdyn_projectteamid,msdyn_name,_msdyn_bookableresourceid_value" +
-      "&$filter=_msdyn_project_value eq " +
-      projectId +
-      " and contains(msdyn_name,'" +
-      encodeURIComponent(safe) +
-      "')" +
-      "&$top=20";
+    // Fetch the FULL plan team (same query as list_team_members) and match
+    // client-side. This guarantees any member visible in list_team_members is
+    // findable here, regardless of what the team-row's msdyn_name holds.
+    const all = await fetchPlanMembers(BASE, projectId);
 
-    const response = await dvReq(
-      {
-        url: url,
-        method: "GET",
-        headers: dvHeaders(),
-      },
-      { retry: true },
-    );
-    const body = response.json || {};
-    if (response.status >= 400) {
-      throw new Error(
-        "find_team_member failed (" + response.status + "): " + dvErrorMessage(response),
-      );
+    const matched = all
+      .map((m) => ({ member: m, ...memberMatch(m, { name, email }) }))
+      .filter((r) => r.match)
+      .map((r) => ({ ...r.member, exactMatch: r.exact, matchType: r.matchType }));
+
+    matched.sort((a, b) => (a.exactMatch === b.exactMatch ? 0 : a.exactMatch ? -1 : 1));
+    const exactCount = matched.filter((m) => m.exactMatch).length;
+
+    let hint: string;
+    let candidates: EnrichedMember[] | undefined;
+    if (matched.length === 0) {
+      // No deterministic match — hand the AI the full roster so it can resolve
+      // the harder cases our matcher won't (typos, nicknames, reordered names,
+      // a partial email) and confirm the pick with the user.
+      hint =
+        "No exact/partial match by name or email. The `candidates` field lists every member of this plan - inspect it yourself and pick the most likely person (allow for typos, nicknames, reordered or transliterated names, or a partial email), then CONFIRM with the user before acting. If nobody fits, the person may not be on the plan team yet - add them in the Planner UI first. You can also retry with an email/UPN.";
+      candidates = all.slice(0, 25);
+    } else if (exactCount === 1) {
+      hint = "Exact match found - use this bookableResourceId for the assignment or list_user_tasks.";
+    } else if (exactCount > 1) {
+      hint = "Multiple team members share this exact name - disambiguate via upn/email; never pick silently.";
+    } else if (matched.length > 1) {
+      hint = "Multiple partial matches (no exact one) - compare upn/email and confirm the intended person with the user.";
+    } else {
+      hint = "Single partial match (matchType='partial', not exact) - sanity-check the upn/email/fullName before using it.";
     }
 
-    const target = name.toLowerCase();
-    const rawMembers = (body.value || []).map((m: any) => ({
-      teamMemberId: m.msdyn_projectteamid,
-      name: m.msdyn_name,
-      bookableResourceId: m._msdyn_bookableresourceid_value,
-      exactMatch:
-        typeof m.msdyn_name === "string" && m.msdyn_name.trim().toLowerCase() === target,
-    }));
-
-    // Enrich with UPN / email / full name (fail-soft: nulls if unresolved).
-    const identities = await resolveResourceIdentities(
-      BASE,
-      rawMembers.map((m: any) => m.bookableResourceId).filter(Boolean),
-    );
-    const members = rawMembers.map((m: any) => {
-      const id = m.bookableResourceId ? identities.get(String(m.bookableResourceId).toLowerCase()) : undefined;
-      return {
-        ...m,
-        upn: id?.upn ?? null,
-        email: id?.email ?? null,
-        fullName: id?.fullName ?? null,
-      };
-    });
-    members.sort((a: any, b: any) => {
-      if (a.exactMatch !== b.exactMatch) return a.exactMatch ? -1 : 1;
-      return 0;
-    });
-    const exactCount = members.filter((m: any) => m.exactMatch).length;
-    let hint: string;
-    if (members.length === 0)
-      hint =
-        "No team member matched - the person may not be on the plan team yet; add them in Planner UI first.";
-    else if (exactCount === 1)
-      hint = "Exact name match found - use this bookableResourceId for the assignment.";
-    else if (exactCount > 1)
-      hint = "Multiple team members share this exact name - ask the user, never pick silently.";
-    else if (members.length > 1) hint = "Multiple matches - ask the user.";
-    else hint = "Unique match.";
     return {
       ok: true,
-      count: members.length,
+      count: matched.length,
       exactMatchCount: exactCount,
-      members: members,
-      hint: hint,
+      members: matched,
+      ...(candidates ? { candidates, confidence: "low" as const } : {}),
+      hint,
     };
   },
 };
