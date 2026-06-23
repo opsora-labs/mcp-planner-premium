@@ -173,7 +173,7 @@ any failure (and `KEEP_PLAN=1`) precisely for this.
   `DELETE /msdyn_projects(<id>)` works for out-of-band cleanup.
 - **Cleanup scoping:** delete only your **own** plan-name prefix; do not nuke all
   `ZZ-*` (you may remove someone else's disposable test plans).
-- The acceptance harness (`test/e2e/pm-acceptance.ts`) drives everything through
+- The acceptance harness (`test/e2e/pmOpsLive.ts`) drives everything through
   the real MCP protocol, keeps the plan on failure, and verifies via independent
   OData reads (never AI summaries). Pure builders are unit-tested separately.
 

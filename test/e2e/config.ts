@@ -39,7 +39,7 @@ const EnvSchema = z.object({
   /**
    * Prefer reuse/resume of the named seed plan over a fresh build.
    * Default: true (warm path). Set to "false" to force a fresh disposable plan
-   * per run (legacy pm-acceptance behaviour).
+   * per run (legacy fresh-plan behaviour).
    */
   REUSE_SEED: z
     .enum(["true", "false"])
@@ -65,7 +65,7 @@ const EnvSchema = z.object({
   FEATURE: z.string().optional(),
   /**
    * Keep the seed plan even after a fully-green run.
-   * Also honoured by pm-acceptance.ts for its disposable plan.
+   * Also honoured wherever the e2e harness creates a disposable plan.
    */
   KEEP_PLAN: z
     .enum(["true", "false", "1", "0"])

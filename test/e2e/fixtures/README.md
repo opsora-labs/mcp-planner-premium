@@ -1,6 +1,6 @@
 # PM acceptance fixtures
 
-`pm-acceptance.ts` reads `it-planner-board.json` from this folder. That file is a
+`pmOpsLive.ts` (run via `npm run e2e:acceptance`) reads `it-planner-board.json` from this folder. That file is a
 **real customer Planner export and is gitignored on purpose** (privacy) — it is
 not committed. To run the PM acceptance test you provide your own fixture here
 with the same shape.
@@ -42,7 +42,7 @@ to this shape with a small openpyxl script (see the project history).
 ```bash
 export E2E_ACCESS_TOKEN=$(npx tsx --env-file .env scripts/get-dataverse-token.ts)
 DATAVERSE_LINK_TYPE_STYLE=eu E2E_TOOL_TIMEOUT_MS=290000 \
-  npx tsx --env-file .env test/e2e/pm-acceptance.ts
+  npx tsx --env-file .env test/e2e/pmOpsLive.ts
 ```
 
 Set `KEEP_PLAN=1` to keep the created plan even on a fully-green run. A failing
