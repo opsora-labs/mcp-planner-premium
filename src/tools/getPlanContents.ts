@@ -26,7 +26,7 @@ export const getPlanContents: ToolDef = {
     SAFE_PAGE_SIZE +
     " tasks per page (each response is kept under hosts' ~200k-char limit so it is NEVER silently truncated) and sets hasMore:true + a `nextPageToken` when more remain — pass the token back as `pageToken` and KEEP PAGING until hasMore is false before treating the plan as complete. A plan with ≤ " +
     SAFE_PAGE_SIZE +
-    " tasks returns everything in one page (no token). Use `bucketId` to narrow to one bucket, or get_plan_summary / get_bucket_breakdown for counts only. Summary task dates, effort and progress are ROLLED UP from children and MUST NOT be written to - pass summaryTaskIds to update_tasks / update_tasks_batch (or just pass projectId to update_tasks, which auto-protects them). The returned task/plan 'progress' is a 0-1 fraction (0.5 = 50%). If truncated=true an internal scan hit the 10,000-row cap and summaryTaskIds may be incomplete.",
+    " tasks returns everything in one page (no token). Use `bucketId` to narrow to one bucket, or get_plan_summary / get_bucket_breakdown for counts only. Summary task dates, effort and progress are ROLLED UP from children and MUST NOT be written to - pass summaryTaskIds to update_tasks / update_tasks_batch (or just pass projectId to update_tasks, which auto-protects them). The returned task/plan 'progress' is a 0-1 fraction (0.5 = 50%). If truncated=true an internal scan hit the 10,000-row cap and summaryTaskIds may be incomplete. To find tasks whose title or notes CONTAIN a given word, name or phrase, use search_plan_tasks instead of paging all tasks and grepping.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     bucketId: z

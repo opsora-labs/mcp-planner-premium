@@ -24,6 +24,7 @@ import { listUserTasks } from "./listUserTasks.js";
 import { getPlanSummary } from "./getPlanSummary.js";
 import { getTask } from "./getTask.js";
 import { listPlanTasks } from "./listPlanTasks.js";
+import { searchPlanTasks } from "./searchPlanTasks.js";
 import { getBucketBreakdown } from "./getBucketBreakdown.js";
 import { listDependencies } from "./listDependencies.js";
 import { listTeamMembers } from "./listTeamMembers.js";
@@ -64,6 +65,7 @@ export const allTools: ToolDef[] = [
   getPlanSummary,
   getTask,
   listPlanTasks,
+  searchPlanTasks,
   getBucketBreakdown,
   listDependencies,
   listTeamMembers,
@@ -98,6 +100,7 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   get_plan_summary: RO,
   get_task: RO,
   list_plan_tasks: RO,
+  search_plan_tasks: RO,
   get_bucket_breakdown: RO,
   list_dependencies: RO,
   list_team_members: RO,

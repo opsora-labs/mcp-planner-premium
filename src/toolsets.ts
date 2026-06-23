@@ -1,11 +1,9 @@
 /**
  * Toolset group → tool-name map.
  *
- * Every registered tool belongs to ≥1 group. The write group also lists one
- * tool name (assign_task) that is not yet registered but will be added in a
- * later wave — listing it here keeps the integration clean and the map-integrity
- * check flags any gap when it lands. The three analytics tools below were
- * registered in this wave and are no longer forward-references.
+ * Every registered tool belongs to ≥1 group. A map-integrity check flags any gap
+ * between this map and the registered tool set, so a tool added without a group
+ * (or a group entry with no matching tool) is caught in tests.
  *
  * Groups:
  *   reporting  — read-only reporting / list views
@@ -22,6 +20,7 @@ export const TOOLSETS: Record<string, readonly string[]> = {
     "get_plan_summary",
     "get_task",
     "list_plan_tasks",
+    "search_plan_tasks",
     "get_bucket_breakdown",
     "list_dependencies",
   ],

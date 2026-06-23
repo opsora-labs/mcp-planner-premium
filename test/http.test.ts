@@ -179,11 +179,11 @@ describe("HTTP layer", () => {
     expect(list.text).not.toContain('"add_tasks"');
   });
 
-  it("/healthz toolCount reflects TOOLSETS=reporting (8 tools)", async () => {
+  it("/healthz toolCount reflects TOOLSETS=reporting (9 tools)", async () => {
     setEnv({ AUTH_MODE: "insecure-passthrough", TOOLSETS: "reporting" });
     const app = freshApp();
     const res = await request(app).get("/healthz");
-    expect(res.body.toolCount).toBe(8);
+    expect(res.body.toolCount).toBe(9);
   });
 
   // --- Production-ops: ENABLED_TOOLS subset ---

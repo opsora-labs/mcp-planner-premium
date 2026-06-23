@@ -22,7 +22,7 @@
  */
 
 import { createServer, type Server } from "node:http";
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { getConfig, redact } from "./config.js";
 import { mcpCall, mcpInitialize } from "./mcpClient.js";
@@ -733,7 +733,8 @@ async function main(): Promise<void> {
   }
 
   const report = renderReport(board, runAt, cfg.DATAVERSE_ORG_URL, Date.now() - t0, residue);
-  const file = `pm-acceptance-report-${runAt.replace(/[:.]/g, "-").slice(0, 19)}.md`;
+  await mkdir("reports", { recursive: true });
+  const file = `reports/pm-acceptance-report-${runAt.replace(/[:.]/g, "-").slice(0, 19)}.md`;
   await writeFile(file, report, "utf-8");
 
   const fail = rows.filter((r) => r.status === "fail").length;

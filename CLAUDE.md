@@ -13,7 +13,7 @@ read-only reporting as MCP tools, in the signed-in user's **delegated** context.
 It is **security-hardened on purpose**. Its safety comes from server-side
 guardrails (allow-lists, GUID checks, summary-task protection, the 200-item cap,
 the delete-confirm gate, whole-plan-delete block). The whole value of this server
-is that those guardrails hold. See `SECURITY.md` and `QUALITY-ASSURANCE.md`.
+is that those guardrails hold. See `SECURITY.md` and `docs/QUALITY-ASSURANCE.md`.
 
 ## Golden rules (do not break these)
 
@@ -118,7 +118,7 @@ makes one of these stop holding, the change is wrong:
 - [ ] No secret read, logged, or committed
 - [ ] Change is on a branch, not `main`
 - [ ] Docs updated if the tool surface or a guarantee changed (README tool table,
-      and `SECURITY.md` / `QUALITY-ASSURANCE.md` if a safeguard changed)
+      and `SECURITY.md` / `docs/QUALITY-ASSURANCE.md` if a safeguard changed)
 
 ## What the automation does (so a block isn't a surprise)
 
@@ -199,17 +199,8 @@ npx tsx --env-file .env scripts/cleanup-e2e-plans.ts
 
 ### One-time human setup (before first autonomous session)
 
-The human must run this once interactively to seed the token cache:
-
-```bash
-npx tsx --env-file .env scripts/auth-login.ts
-# Follow the on-screen prompt: visit the URL and enter the code.
-# Sign in with a user that holds a Project Plan P3 / Planner Premium license.
-# .tokens.json is written automatically and is gitignored.
-```
-
-Entra app prerequisites (set up once by the human in Entra admin center):
-- API permissions: `Dynamics CRM → Delegated → user_impersonation` (grant admin consent)
-- Authentication tab: **Allow public client flows = Yes** (required for device-code)
-- `.env` must contain: `TENANT_ID`, `ENTRA_CLIENT_ID`, `DATAVERSE_ORG_URL`
-- Optional but recommended: `ENTRA_CLIENT_SECRET` (binds refresh token to this client)
+This is the human's responsibility, done once. See
+[docs/AUTONOMOUS-SETUP.md](docs/AUTONOMOUS-SETUP.md) for the full walkthrough:
+Entra app registration (delegated `user_impersonation`, public-client flows),
+the required `.env` vars, and the one-time `scripts/auth-login.ts` device-code
+sign-in that seeds `.tokens.json`.

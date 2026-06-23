@@ -4,7 +4,7 @@ import { allTools, toolAnnotations } from "../src/tools/index.js";
 import type { ToolFilterEnv } from "../src/toolFilter.js";
 
 // Read-only tool names (14 original + 3 analytics tools + 2 member-info/user-task
-// tools added in feat/member-info-and-user-tasks).
+// tools added in feat/member-info-and-user-tasks + search_plan_tasks).
 const READ_ONLY_TOOL_NAMES = new Set([
   "check_change_session_status",
   "find_plan_by_name",
@@ -18,6 +18,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "get_plan_summary",
   "get_task",
   "list_plan_tasks",
+  "search_plan_tasks",
   "get_bucket_breakdown",
   "list_dependencies",
   "list_team_members",
@@ -133,12 +134,12 @@ describe("filterTools — ENABLED_TOOLS", () => {
 });
 
 describe("filterTools — TOOLSETS", () => {
-  it("reporting toolset returns 8 tools", () => {
+  it("reporting toolset returns 9 tools", () => {
     const { tools } = filterTools(allTools, toolAnnotations, {
       readOnly: false,
       toolsets: ["reporting"],
     });
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(9);
     const names = new Set(tools.map((t) => t.name));
     for (const name of TOOLSETS["reporting"]) {
       expect(names.has(name)).toBe(true);
@@ -153,12 +154,12 @@ describe("filterTools — TOOLSETS", () => {
     expect(tools).toHaveLength(7);
   });
 
-  it("reporting + sessions union returns 12 tools (no duplicates)", () => {
+  it("reporting + sessions union returns 13 tools (no duplicates)", () => {
     const { tools } = filterTools(allTools, toolAnnotations, {
       readOnly: false,
       toolsets: ["reporting", "sessions"],
     });
-    expect(tools).toHaveLength(12);
+    expect(tools).toHaveLength(13);
     // Check no duplicates
     const names = tools.map((t) => t.name);
     const unique = new Set(names);

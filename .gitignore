@@ -8,7 +8,10 @@ dist/
 
 test/e2e/fixtures/it-planner-board.json
 
-# PM acceptance reports contain real customer task names — keep local only
+# Acceptance / e2e reports hold real customer task names — keep local only.
+# Reports are written into reports/; the root globs catch any stray legacy output.
+reports/
+!reports/.gitkeep
 pm-acceptance-report-*.md
 e2e-report-*.md
 

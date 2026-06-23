@@ -40,7 +40,7 @@ Follow it in order. Do not skip the test step. Tool to add: $ARGUMENTS
 - Run `/verify` (typecheck + tests). Both must be green.
 - Update the tool table in `README.md`.
 - If the tool changes a security guarantee, update `SECURITY.md` and
-  `QUALITY-ASSURANCE.md`.
+  `docs/QUALITY-ASSURANCE.md`.
 
 ## 5. Finish
 

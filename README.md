@@ -29,7 +29,7 @@ MCP host (OAuth client)
         |
         v
 this server (stateless, streamable HTTP)
-   - 29 tools (incl. whoami diagnostic)
+   - 32 tools (incl. whoami diagnostic)
    - validates then forwards the inbound bearer to Dataverse
         |
         v
@@ -53,8 +53,8 @@ preserved.
 ## Read tools
 
 The read tools (`list_plans`, `list_my_tasks`, `get_plan_summary`,
-`get_plan_tasks_and_buckets`, `get_task`, `list_plan_tasks`, `get_bucket_breakdown`,
-`list_dependencies`, `list_team_members`) cover Planner-Premium reporting and
+`get_plan_tasks_and_buckets`, `get_task`, `list_plan_tasks`, `search_plan_tasks`,
+`get_bucket_breakdown`, `list_dependencies`, `list_team_members`) cover Planner-Premium reporting and
 exploration in the same delegated context as the write tools — **one connection,
 one token, one allow-listed surface**. `list_my_tasks` resolves "me" via `whoami`
 (→ the user's bookable resource) so the caller never passes a user id.
@@ -105,6 +105,7 @@ means the server is not dangerous even when used from a host with no skill loade
 | `get_plan_summary` | Plan rollup: dates, %, effort, task/milestone/overdue counts — read |
 | `get_task` | One task in full + dependency links + assignments — read |
 | `list_plan_tasks` | Filtered task list (`all` / `overdue` / `milestones`, optional bucket) — read |
+| `search_plan_tasks` | Find tasks whose title/notes **contain** given text (server-side `contains()`); `query` accepts one string or an array of terms (OR) — read |
 | `get_bucket_breakdown` | Per-bucket task count + avg progress — read |
 | `list_dependencies` | All predecessor→successor links (type + lag) — read |
 | `list_team_members` | All plan team members, each with `bookableResourceId` + UPN/email/full name — read |
@@ -283,7 +284,7 @@ In your host's remote MCP / OAuth connector settings, provide:
 Set `ENTRA_CLIENT_ID` on the container app to the same client ID so the server pins
 inbound tokens to this app and rejects anything else.
 
-Run **Test connection** — it should list the 29 tools.
+Run **Test connection** — it should list the 32 tools.
 Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
 `create_plan` → `add_bucket` → `start_change_session` → `add_tasks` →
 `apply_changes` → poll `check_change_session_status` until `192350003`
@@ -291,7 +292,7 @@ Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
 
 ## End-to-end acceptance test
 
-The e2e harness connects to the server **through the MCP protocol** (same path any MCP host uses), drives all 29 tools, and writes a markdown report.
+The e2e harness connects to the server **through the MCP protocol** (same path any MCP host uses), drives all 32 tools, and writes a markdown report.
 
 ```bash
 # Minimum — read-only, boots a local server automatically:
@@ -311,15 +312,38 @@ npm run e2e
 ```
 
 The harness:
-- **Phase 0 — Preflight:** confirms all 29 tools are advertised and the delegated token reaches Dataverse (`whoami`).
+- **Phase 0 — Preflight:** confirms all 32 tools are advertised and the delegated token reaches Dataverse (`whoami`).
 - **Phase 1 — Read sweep:** exercises all 8 read/reporting tools and asserts shapes and units (progressPercent 0-100 vs 0-1 fraction, truncated flags, degrade-to-warning arrays).
 - **Phase 2 — Write lifecycle** (`E2E_ALLOW_WRITES=true`): create plan → bucket → open session → `add_tasks` with a 6-level tree + FS dependency → apply → poll until 192350003 → `get_plan_tasks_and_buckets` + independent OData cross-check → second session: `update_tasks` (rename + milestone) → apply → field-level OData verify → cleanup (tasks/buckets deleted, session cancelled).
 - **Phase 3 — Guardrails:** 13 negative tests that must be *rejected* (bad bind alias, blocked-on-create fields, child-before-parent, >200 entities, delete without `confirmed`, whole-plan delete, dependency update, progress out-of-range, cycle detection, etc.).
 - **Phase 4 — Agentic exploratory** (optional): a real `claude-opus-4-8` reads only the tool descriptions, builds a small plan autonomously, and **code verifies** the Dataverse result. Tests interface usability, not just correctness.
 
-**Security:** `E2E_ACCESS_TOKEN` is held in memory only, redacted from all logs and the report, and never written to disk. Pass/fail is decided by code assertions, never by an AI-generated summary. The report is written to `e2e-report-<UTC>.md` and exits non-zero on any failure (CI-friendly).
+**Security:** `E2E_ACCESS_TOKEN` is held in memory only, redacted from all logs and the report, and never written to disk. Pass/fail is decided by code assertions, never by an AI-generated summary. The report is written to `reports/e2e-report-<UTC>.md` (gitignored — reports can contain real task names) and exits non-zero on any failure (CI-friendly).
 
 > **Residue:** whole-plan deletion is blocked by the PSS API. Each write run leaves one clearly-named test plan (`ZZ-MCP-E2E-<UTC>`) — the report lists it and you remove it in the Planner UI.
+
+## Repository layout
+
+```
+src/         server + one file per MCP tool (guardrails live here)
+test/        unit tests (npm test) and the live e2e harness (test/e2e/)
+scripts/     one-time/maintenance scripts (auth-login, token, e2e cleanup)
+docs/        developer & operator documentation (see docs/README.md)
+skills/      host-side prompts you give an MCP host that connects to this server
+reports/     local acceptance/e2e report output (gitignored)
+.claude/     Claude Code safety setup — hooks, slash commands, subagents
+```
+
+**Documentation** (all in [docs/](docs/)):
+- [CLAUDE.md](./CLAUDE.md) — start here if you're changing the code (golden rules, guardrails).
+- [SECURITY.md](./SECURITY.md) — security posture and compliance checklist.
+- [docs/QUALITY-ASSURANCE.md](docs/QUALITY-ASSURANCE.md) — the QA strategy and test matrix.
+- [docs/AUTONOMOUS-SETUP.md](docs/AUTONOMOUS-SETUP.md) — one-time setup for autonomous Claude Code sessions.
+- [docs/PSS-IMPLEMENTATION-LESSONS.md](docs/PSS-IMPLEMENTATION-LESSONS.md) — the Dataverse/PSS field guide (read before adding a PSS feature).
+
+**Host-side skills** ([skills/](skills/)) — prompts for the MCP host once it's connected to this server:
+- [skills/guided-assistant.md](skills/guided-assistant.md) — a guided Planner Premium assistant for non-technical PMs.
+- [skills/acceptance-test-runner.md](skills/acceptance-test-runner.md) — drive an interactive acceptance run through any MCP host.
 
 ## Open TODOs
 

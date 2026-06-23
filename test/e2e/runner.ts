@@ -14,7 +14,7 @@
  */
 
 import { createServer, type Server } from "node:http";
-import { writeFile } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import { getConfig, redact } from "./config.js";
 import { stepLog, clearLog } from "./steps.js";
 import type { StepContext } from "./steps.js";
@@ -162,7 +162,8 @@ async function main(): Promise<void> {
   };
 
   const report = renderReport(summary);
-  const reportFile = `e2e-report-${runAt.replace(/[:.]/g, "-").slice(0, 19)}.md`;
+  await mkdir("reports", { recursive: true });
+  const reportFile = `reports/e2e-report-${runAt.replace(/[:.]/g, "-").slice(0, 19)}.md`;
   await writeFile(reportFile, report, "utf-8");
 
   // ── 4. Console summary + exit ─────────────────────────────────────────
