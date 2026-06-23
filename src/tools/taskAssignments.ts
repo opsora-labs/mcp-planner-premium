@@ -10,7 +10,7 @@
  * Read-only. Chunks long $filter id lists so the URL never grows unbounded.
  */
 import { dvReq, dvHeaders, dvErrorMessage } from "../dataverse.js";
-import { nowIso } from "./readHelpers.js";
+import { nowIso, clampLimit, SAFE_PAGE_SIZE, pageByOffset } from "./readHelpers.js";
 
 /** Splits ids into OR-filter chunks so the $filter URL never grows unbounded. */
 export function chunkIds<T>(ids: T[], size = 20): T[][] {
@@ -51,6 +51,7 @@ export interface AssignedTask {
   subject: string;
   projectId: string | null;
   planName: string | null;
+  bucketId: string | null;
   bucketName: string | null;
   start: string | null;
   finish: string | null;
@@ -70,14 +71,16 @@ export interface ResourceTasksResult {
  * scoped to one plan, and filtered by 'all' | 'overdue' | 'active'. Summary
  * (parent) tasks are excluded from overdue/active (their dates roll up).
  *
- * `scopeProject` is a lowercase-comparable plan GUID or "" for all plans. The
- * caller is responsible for validating it as a GUID.
+ * `scopeProject` is a plan GUID or "" for all plans; `bucketId` is a bucket GUID
+ * or "" for all buckets (bucketIds are globally unique, so it works with or
+ * without a plan scope). The caller is responsible for validating both as GUIDs.
  */
 export async function tasksForResourceIds(
   base: string,
   resourceIds: string[],
   filter: "all" | "overdue" | "active",
   scopeProject: string,
+  bucketId = "",
 ): Promise<ResourceTasksResult> {
   const empty = (note: string): ResourceTasksResult => ({ count: 0, tasks: [], note });
 
@@ -142,9 +145,19 @@ export async function tasksForResourceIds(
   const isActive = (t: any) =>
     !isSummary(t) && (typeof t.msdyn_progress !== "number" || t.msdyn_progress < 1);
 
-  let chosen = taskRows;
-  if (filter === "overdue") chosen = taskRows.filter(isOverdue);
-  else if (filter === "active") chosen = taskRows.filter(isActive);
+  // Optional bucket scope. Tasks already carry their bucket value, so this is a
+  // client-side filter — lets one call answer "<person>'s tasks in <bucket>"
+  // instead of forcing the caller to cross-reference a whole-plan listing.
+  const bucketScope = bucketId.toLowerCase();
+  const scopedRows = bucketScope
+    ? taskRows.filter(
+        (t: any) => String(t._msdyn_projectbucket_value || "").toLowerCase() === bucketScope,
+      )
+    : taskRows;
+
+  let chosen = scopedRows;
+  if (filter === "overdue") chosen = scopedRows.filter(isOverdue);
+  else if (filter === "active") chosen = scopedRows.filter(isActive);
 
   const tasks: AssignedTask[] = chosen
     .map((t: any) => ({
@@ -152,6 +165,7 @@ export async function tasksForResourceIds(
       subject: t.msdyn_subject,
       projectId: t._msdyn_project_value ?? null,
       planName: t.msdyn_project?.msdyn_subject ?? null,
+      bucketId: t._msdyn_projectbucket_value ?? null,
       bucketName: t.msdyn_projectbucket?.msdyn_name ?? null,
       start: t.msdyn_start ?? null,
       finish: t.msdyn_finish ?? null,
@@ -162,5 +176,61 @@ export async function tasksForResourceIds(
     }))
     .sort((a, b) => String(a.finish ?? "").localeCompare(String(b.finish ?? "")));
 
-  return { count: tasks.length, tasks };
+  const note =
+    bucketScope && tasks.length === 0
+      ? "No assigned tasks in that bucket" + (scopeProject ? " on that plan." : ".")
+      : undefined;
+  return { count: tasks.length, tasks, ...(note ? { note } : {}) };
+}
+
+export interface AssignedTasksPage {
+  pageLimit: number;
+  count: number;
+  totalCount: number;
+  hasMore: boolean;
+  nextPageToken?: string;
+  note?: string;
+  warnings?: string[];
+  tasks: AssignedTask[];
+}
+
+/**
+ * Turns a fully-resolved assignment result into ONE host-safe page. Without this,
+ * a heavy assignee's whole task list goes back in a single response and a host
+ * (e.g. Langdock) silently truncates it mid-JSON past ~200k chars. Caps each page
+ * at SAFE_PAGE_SIZE with the same SHORT numeric-offset cursor the plan reads use,
+ * so the model can reliably page until hasMore is false. `count` is this page's
+ * size; `totalCount` is the full match count. Pre-resolution empty notes (no team
+ * / no assignments / empty bucket) pass through unchanged on a count-0 page.
+ */
+export function paginateAssignedTasks(
+  result: ResourceTasksResult,
+  limit?: number,
+  pageToken?: string,
+): AssignedTasksPage {
+  const pageLimit = Math.min(clampLimit(limit), SAFE_PAGE_SIZE);
+  const page = pageByOffset(result.tasks, pageLimit, pageToken);
+  const hasMore = page.hasMore;
+  const warnings: string[] = [];
+  if (hasMore && !page.fits)
+    warnings.push(
+      "This page was reduced to stay within the host response-size limit; more tasks remain - page with pageToken.",
+    );
+  const note = hasMore
+    ? "Incomplete: returned " +
+      page.items.length +
+      " of " +
+      result.count +
+      " matching tasks. Call the same tool again with this pageToken (same args) and keep paging until hasMore is false before counting or summarising."
+    : result.note;
+  return {
+    pageLimit,
+    count: page.items.length,
+    totalCount: result.count,
+    hasMore,
+    nextPageToken: page.nextPageToken,
+    ...(note ? { note } : {}),
+    ...(warnings.length ? { warnings } : {}),
+    tasks: page.items,
+  };
 }

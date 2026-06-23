@@ -130,4 +130,50 @@ describe("list_my_tasks", () => {
     expect(res.count).toBe(0);
     expect(res.note).toMatch(/not a Project bookable resource/i);
   });
+
+  it("pages my tasks with a short cursor when more than limit remain", async () => {
+    mockChain();
+    const p1 = await withBearer(() => (listMyTasks.handler as any)({ filter: "all", limit: 1 }));
+    expect(p1.count).toBe(1);
+    expect(p1.totalCount).toBe(2);
+    expect(p1.hasMore).toBe(true);
+    expect(p1.nextPageToken).toBeDefined();
+    expect(Buffer.from(p1.nextPageToken, "base64url").toString("utf8")).toBe("1");
+
+    const p2 = await withBearer(() =>
+      (listMyTasks.handler as any)({ filter: "all", limit: 1, pageToken: p1.nextPageToken }),
+    );
+    expect(p2.count).toBe(1);
+    expect(p2.totalCount).toBe(2);
+    expect(p2.hasMore).toBe(false);
+    expect(p2.nextPageToken).toBeUndefined();
+  });
+
+  it("bucketId scopes my tasks to one bucket in a single call", async () => {
+    const BUCKET = "00000000-0000-0000-0000-0000000000c1";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes("/WhoAmI")) return jsonRes({ UserId: USER });
+      if (url.includes("/bookableresources")) return jsonRes({ value: [{ bookableresourceid: RES }] });
+      if (url.includes("/msdyn_projectteams"))
+        return jsonRes({ value: [{ msdyn_projectteamid: "team1", _msdyn_project_value: "proj1" }] });
+      if (url.includes("/msdyn_resourceassignments"))
+        return jsonRes({ value: [{ _msdyn_taskid_value: "tA" }, { _msdyn_taskid_value: "tB" }] });
+      if (url.includes("/msdyn_projecttasks")) {
+        if (url.includes("_msdyn_parenttask_value eq")) return jsonRes({ value: [] });
+        return jsonRes({
+          value: [
+            { msdyn_projecttaskid: "tA", msdyn_subject: "A", msdyn_finish: "2099-01-01T00:00:00Z", msdyn_progress: 0, _msdyn_project_value: "proj1", _msdyn_projectbucket_value: BUCKET, msdyn_projectbucket: { msdyn_name: "Client Management" } },
+            { msdyn_projecttaskid: "tB", msdyn_subject: "B", msdyn_finish: "2099-01-01T00:00:00Z", msdyn_progress: 0, _msdyn_project_value: "proj1", _msdyn_projectbucket_value: "00000000-0000-0000-0000-0000000000c2", msdyn_projectbucket: { msdyn_name: "Other" } },
+          ],
+        });
+      }
+      return jsonRes({ value: [] });
+    });
+    const res = await withBearer(() => (listMyTasks.handler as any)({ filter: "all", bucketId: BUCKET }));
+    expect(res.bucketId).toBe(BUCKET);
+    expect(res.count).toBe(1);
+    expect(res.tasks[0].subject).toBe("A");
+    expect(res.tasks[0].bucketId).toBe(BUCKET);
+  });
 });

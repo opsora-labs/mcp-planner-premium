@@ -100,8 +100,8 @@ means the server is not dangerous even when used from a host with no skill loade
 | `get_plan_tasks_and_buckets` | Full task + bucket list with `summaryTaskIds` |
 | `whoami` | Diagnostic: confirms signed-in user and token |
 | `list_plans` | Recent plans (name, dates, progress, effort) — read |
-| `list_my_tasks` | The signed-in user's tasks across plans (`all`/`overdue`/`active`) — read |
-| `list_user_tasks` | A **specific** person's tasks (by `bookableResourceId`) across plans (`all`/`overdue`/`active`) — read |
+| `list_my_tasks` | The signed-in user's tasks across plans (`all`/`overdue`/`active`, optional `bucketId` scope) — read |
+| `list_user_tasks` | A **specific** person's tasks (by `bookableResourceId`) across plans (`all`/`overdue`/`active`, optional `bucketId` scope) — read |
 | `get_plan_summary` | Plan rollup: dates, %, effort, task/milestone/overdue counts — read |
 | `get_task` | One task in full + dependency links + assignments — read |
 | `list_plan_tasks` | Filtered task list (`all` / `overdue` / `milestones`, optional bucket) — read |
