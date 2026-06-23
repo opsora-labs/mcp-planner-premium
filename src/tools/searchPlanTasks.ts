@@ -176,14 +176,23 @@ export function buildSearchFilter(
   guidPred(filters.bucketId, "bucketId", "_msdyn_projectbucket_value");
   guidPred(filters.sprintId, "sprintId", "_msdyn_projectsprint_value");
   guidPred(filters.parentTaskId, "parentTaskId", "_msdyn_parenttask_value");
-  if (filters.isMilestone != null)
-    structured.push("msdyn_ismilestone eq " + (filters.isMilestone ? "true" : "false"));
-  if (filters.priorityMin != null) structured.push("msdyn_priority ge " + filters.priorityMin);
-  if (filters.priorityMax != null) structured.push("msdyn_priority le " + filters.priorityMax);
-  if (filters.progressMin != null) structured.push("msdyn_progress ge " + filters.progressMin);
-  if (filters.progressMax != null) structured.push("msdyn_progress le " + filters.progressMax);
-  if (filters.effortMin != null) structured.push("msdyn_effort ge " + filters.effortMin);
-  if (filters.effortMax != null) structured.push("msdyn_effort le " + filters.effortMax);
+  // Like blank strings above, some hosts cannot omit an optional NUMBER/BOOLEAN
+  // and send the type's zero default (0 / false). A 0 numeric bound is therefore
+  // treated as "no bound": it is either a harmless no-op (e.g. `progress ge 0`) or
+  // a footgun (`progress le 0` / `effort le 0` would wrongly exclude every started
+  // or estimated task). isMilestone only filters when explicitly true; false (the
+  // boolean default) applies no milestone filter.
+  const numPred = (val: number | undefined, field: string, op: "ge" | "le") => {
+    if (typeof val !== "number" || !Number.isFinite(val) || val === 0) return;
+    structured.push(field + " " + op + " " + val);
+  };
+  if (filters.isMilestone === true) structured.push("msdyn_ismilestone eq true");
+  numPred(filters.priorityMin, "msdyn_priority", "ge");
+  numPred(filters.priorityMax, "msdyn_priority", "le");
+  numPred(filters.progressMin, "msdyn_progress", "ge");
+  numPred(filters.progressMax, "msdyn_progress", "le");
+  numPred(filters.effortMin, "msdyn_effort", "ge");
+  numPred(filters.effortMax, "msdyn_effort", "le");
   datePred(filters.startAfter, "startAfter", "msdyn_start", "ge");
   datePred(filters.startBefore, "startBefore", "msdyn_start", "lt");
   datePred(filters.finishAfter, "finishAfter", "msdyn_finish", "ge");
@@ -232,7 +241,7 @@ export const searchPlanTasks: ToolDef = {
   name: "search_plan_tasks",
   title: "Search Plan Tasks (text)",
   description:
-    "Server-side TEXT SEARCH within ONE plan: returns only the tasks whose title (msdyn_subject) and/or notes (msdyn_description) CONTAIN the query, by pushing an OData contains() filter to Dataverse. Use THIS to find tasks that mention a word, name, date or phrase (e.g. a person's name in the notes) - do NOT page through get_plan_tasks_and_buckets or list_plan_tasks and grep client-side. Matching is case-insensitive substring. Pass `query` as a single string, OR as an ARRAY of terms to match ANY of them in one call (OR) - prefer this over client-side grep alternation, which is unreliable on some hosts. Searches both title and notes by default; set `fields` to 'subject' or 'description' to narrow. `query` is OPTIONAL when you supply at least one PROPERTY FILTER - all AND-composed with the text match: `bucketId`, `sprintId`, `parentTaskId` (GUIDs - you MUST resolve these to real GUIDs first via get_plan_tasks_and_buckets / list_plan_tasks / get_task; never guess a GUID or pass a display name), `isMilestone` (bool), `priorityMin`/`priorityMax` (int), `progressMin`/`progressMax` (0-1 fraction, 0.5 = 50%), `effortMin`/`effortMax` (hours), and date windows `startAfter`/`startBefore`/`finishAfter`/`finishBefore` (and actuals `actualStartAfter`/`actualStartBefore`/`actualFinishAfter`/`actualFinishBefore`, which need a Project Operations tenant) as ISO-8601 dates. Example - notes containing 'Marcin' in one bucket: query:'Marcin', fields:'description', bucketId:<that bucket's GUID>. If a needed GUID or date is not given to you, CALL THE RIGHT READ TOOL to obtain it before searching rather than guessing. Any optional filter you do NOT want is best omitted, but a blank/empty string ('') is also accepted and simply ignored (so a date-window-only search can leave bucketId/sprintId/parentTaskId empty). Note this tool CANNOT filter by assignee - to find a particular PERSON's tasks use list_user_tasks / list_my_tasks (which key on the assignee), optionally cross-referencing taskIds. Optional `filter` 'all'|'overdue'|'milestones' (as in list_plan_tasks) further narrows the matched rows. Returns the same task shape as list_plan_tasks (taskId, subject, description preview, bucket, dates, progress, …). Size-capped and paged: at most " +
+    "Server-side TEXT SEARCH within ONE plan: returns only the tasks whose title (msdyn_subject) and/or notes (msdyn_description) CONTAIN the query, by pushing an OData contains() filter to Dataverse. Use THIS to find tasks that mention a word, name, date or phrase (e.g. a person's name in the notes) - do NOT page through get_plan_tasks_and_buckets or list_plan_tasks and grep client-side. Matching is case-insensitive substring. Pass `query` as a single string, OR as an ARRAY of terms to match ANY of them in one call (OR) - prefer this over client-side grep alternation, which is unreliable on some hosts. Searches both title and notes by default; set `fields` to 'subject' or 'description' to narrow. `query` is OPTIONAL when you supply at least one PROPERTY FILTER - all AND-composed with the text match: `bucketId`, `sprintId`, `parentTaskId` (GUIDs - you MUST resolve these to real GUIDs first via get_plan_tasks_and_buckets / list_plan_tasks / get_task; never guess a GUID or pass a display name), `isMilestone` (bool), `priorityMin`/`priorityMax` (int), `progressMin`/`progressMax` (0-1 fraction, 0.5 = 50%), `effortMin`/`effortMax` (hours), and date windows `startAfter`/`startBefore`/`finishAfter`/`finishBefore` (and actuals `actualStartAfter`/`actualStartBefore`/`actualFinishAfter`/`actualFinishBefore`, which need a Project Operations tenant) as ISO-8601 dates. Example - notes containing 'Marcin' in one bucket: query:'Marcin', fields:'description', bucketId:<that bucket's GUID>. If a needed GUID or date is not given to you, CALL THE RIGHT READ TOOL to obtain it before searching rather than guessing. Any optional filter you do NOT want is best omitted, but zero/default values are also tolerated and ignored: a blank string ('') GUID/date, a 0 numeric bound, and isMilestone:false are all treated as 'not set' (so a host that fills every field with its zero/false default does not accidentally over-filter and return nothing). To actually filter, pass a real GUID, a positive numeric bound, or isMilestone:true. Note this tool CANNOT filter by assignee - to find a particular PERSON's tasks use list_user_tasks / list_my_tasks (which key on the assignee), optionally cross-referencing taskIds. Optional `filter` 'all'|'overdue'|'milestones' (as in list_plan_tasks) further narrows the matched rows. Returns the same task shape as list_plan_tasks (taskId, subject, description preview, bucket, dates, progress, …). Size-capped and paged: at most " +
     SAFE_PAGE_SIZE +
     " tasks per page (shrinks further when notes are large) - KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). LIMITATION: notes are stored HTML-entity-encoded, so a term containing quotes, ampersands or angle-brackets (\" & ' < >) may not match the human-readable text - search a plain-text fragment instead; the response warns when a term contains such characters. A long note is clipped to a preview (descriptionTruncated:true) - fetch full text via get_task. If truncated=true the underlying 10,000-row scan was incomplete.",
   inputSchema: {
@@ -272,7 +281,9 @@ export const searchPlanTasks: ToolDef = {
     isMilestone: z
       .boolean()
       .optional()
-      .describe("true = only milestone tasks; false = only non-milestone tasks."),
+      .describe(
+        "true = only milestone tasks. false or omitted applies NO milestone filter (false is treated as 'not set' so hosts that default booleans to false don't hide milestones).",
+      ),
     priorityMin: z
       .number()
       .int()
@@ -280,7 +291,11 @@ export const searchPlanTasks: ToolDef = {
       .describe(
         "Minimum msdyn_priority, inclusive (>=). Priority is an integer on a tenant-defined scale - read a task with get_task first if you are unsure which values mean high/low.",
       ),
-    priorityMax: z.number().int().optional().describe("Maximum msdyn_priority, inclusive (<=)."),
+    priorityMax: z
+      .number()
+      .int()
+      .optional()
+      .describe("Maximum msdyn_priority, inclusive (<=). 0 is treated as 'no bound' - use a positive value to filter."),
     progressMin: z
       .number()
       .min(0)
@@ -292,9 +307,15 @@ export const searchPlanTasks: ToolDef = {
       .min(0)
       .max(1)
       .optional()
-      .describe("Maximum progress as a 0-1 FRACTION (0.5 = 50%), inclusive (<=). e.g. progressMax:0.999 ≈ not yet complete."),
+      .describe(
+        "Maximum progress as a 0-1 FRACTION (0.5 = 50%), inclusive (<=). e.g. progressMax:0.999 ≈ not yet complete. 0 is treated as 'no bound', not 'not started'.",
+      ),
     effortMin: z.number().min(0).optional().describe("Minimum planned effort in HOURS (msdyn_effort), inclusive (>=)."),
-    effortMax: z.number().min(0).optional().describe("Maximum planned effort in HOURS (msdyn_effort), inclusive (<=)."),
+    effortMax: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Maximum planned effort in HOURS (msdyn_effort), inclusive (<=). 0 is treated as 'no bound'."),
     startAfter: z
       .string()
       .optional()
@@ -390,9 +411,16 @@ export const searchPlanTasks: ToolDef = {
     const built = buildSearchFilter(projectId, input.query, fields, filters);
     toolWarnings.push(...built.warnings);
 
+    // Echo only the filters that actually became predicates: drop undefined,
+    // blank strings, the numeric 0 default and isMilestone:false (see
+    // buildSearchFilter - hosts that can't omit a field send these zero defaults).
     const appliedFilters = Object.fromEntries(
       Object.entries(filters).filter(
-        ([, v]) => v !== undefined && !(typeof v === "string" && v.trim() === ""),
+        ([k, v]) =>
+          v !== undefined &&
+          !(typeof v === "string" && v.trim() === "") &&
+          !(typeof v === "number" && v === 0) &&
+          !(k === "isMilestone" && v === false),
       ),
     );
 

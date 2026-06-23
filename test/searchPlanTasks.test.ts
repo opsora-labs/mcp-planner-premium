@@ -185,6 +185,34 @@ describe("buildSearchFilter", () => {
     const r2 = buildSearchFilter(PROJECT, "x", "both", { startAfter: "" });
     expect(r2.filter).not.toContain("msdyn_start");
   });
+
+  it("treats zero-default numbers and isMilestone:false as 'not set' (host can't omit)", () => {
+    // Mirrors a real host payload: every optional number defaulted to 0 and
+    // isMilestone defaulted to false. Only the real text + finish window must
+    // become predicates - the spurious `le 0` bounds would otherwise return zero.
+    const { filter } = buildSearchFilter(PROJECT, "Marcin", "description", {
+      isMilestone: false,
+      priorityMin: 0,
+      priorityMax: 0,
+      progressMin: 0,
+      progressMax: 0,
+      effortMin: 0,
+      effortMax: 0,
+      finishAfter: "2026-06-01T00:00:00+02:00",
+      finishBefore: "2026-07-01T00:00:00+02:00",
+    });
+    expect(filter).toContain("contains(msdyn_description,'Marcin')");
+    expect(filter).toContain("msdyn_finish ge 2026-05-31T22:00:00.000Z"); // +02:00 -> UTC
+    expect(filter).toContain("msdyn_finish lt 2026-06-30T22:00:00.000Z");
+    expect(filter).not.toContain("msdyn_progress");
+    expect(filter).not.toContain("msdyn_effort");
+    expect(filter).not.toContain("msdyn_priority");
+    expect(filter).not.toContain("msdyn_ismilestone");
+    // A real, non-zero bound and isMilestone:true still apply.
+    const r2 = buildSearchFilter(PROJECT, "x", "both", { progressMax: 0.5, isMilestone: true });
+    expect(r2.filter).toContain("msdyn_progress le 0.5");
+    expect(r2.filter).toContain("msdyn_ismilestone eq true");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -403,5 +431,38 @@ describe("search_plan_tasks handler", () => {
     expect(urls.some((u) => u.includes("msdyn_finish lt 2026-07-06T00:00:00.000Z"))).toBe(true);
     // No bucket PREDICATE (the column still appears in $select, so match "… eq").
     expect(urls.every((u) => !u.includes("_msdyn_projectbucket_value eq"))).toBe(true);
+  });
+
+  it("ignores zero-default numbers / isMilestone:false from hosts that can't omit fields", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      urls.push(String(input));
+      return jsonRes({ value: [row()] });
+    });
+    const r = await call({
+      projectId: PROJECT,
+      query: "Marcin",
+      fields: "description",
+      isMilestone: false,
+      priorityMin: 0,
+      priorityMax: 0,
+      progressMin: 0,
+      progressMax: 0,
+      effortMin: 0,
+      effortMax: 0,
+      finishAfter: "2026-06-01T00:00:00+02:00",
+      finishBefore: "2026-07-01T00:00:00+02:00",
+    });
+    expect(r.ok).toBe(true);
+    // The echo lists only the filters that actually applied - just the dates.
+    expect(r.appliedFilters).toEqual({
+      finishAfter: "2026-06-01T00:00:00+02:00",
+      finishBefore: "2026-07-01T00:00:00+02:00",
+    });
+    expect(urls.some((u) => u.includes("msdyn_progress le 0"))).toBe(false);
+    expect(urls.some((u) => u.includes("msdyn_effort le 0"))).toBe(false);
+    // msdyn_ismilestone is in $select, so assert no PREDICATE ("… eq").
+    expect(urls.some((u) => u.includes("msdyn_ismilestone eq"))).toBe(false);
+    expect(urls.some((u) => u.includes("contains(msdyn_description,'Marcin')"))).toBe(true);
   });
 });
