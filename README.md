@@ -105,7 +105,7 @@ means the server is not dangerous even when used from a host with no skill loade
 | `get_plan_summary` | Plan rollup: dates, %, effort, task/milestone/overdue counts — read |
 | `get_task` | One task in full + dependency links + assignments — read |
 | `list_plan_tasks` | Filtered task list (`all` / `overdue` / `milestones`, optional bucket) — read |
-| `search_plan_tasks` | Find tasks whose title/notes **contain** given text (server-side `contains()`); `query` accepts one string or an array of terms (OR) — read |
+| `search_plan_tasks` | Find tasks whose title/notes **contain** given text (server-side `contains()`); `query` accepts one string or an array of terms (OR), and is optional when combined with property filters: `bucketId` / `sprintId` / `parentTaskId`, `isMilestone`, `priority`/`progress`/`effort` ranges, and `start`/`finish` (+actuals) date windows — all AND-composed server-side — read |
 | `get_bucket_breakdown` | Per-bucket task count + avg progress — read |
 | `list_dependencies` | All predecessor→successor links (type + lag) — read |
 | `list_team_members` | All plan team members, each with `bookableResourceId` + UPN/email/full name — read |

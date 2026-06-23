@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { resetEnvCache } from "../src/config.js";
 import { requestContext } from "../src/context.js";
-import { resetCapabilities } from "../src/tools/capabilities.js";
+import { resetCapabilities, setExtendedTaskFieldsCapability } from "../src/tools/capabilities.js";
 import { searchPlanTasks, buildSearchFilter } from "../src/tools/searchPlanTasks.js";
 
 const ORG = "https://org12345.crm4.dynamics.com";
@@ -104,6 +104,67 @@ describe("buildSearchFilter", () => {
     // payload stays inside one literal — the leading '' proves the escape.
     expect(filter).toContain("contains(msdyn_subject,'''");
     expect(filter).toContain("%20or%20"); // the injected " or " is encoded, not an operator
+  });
+
+  // --- structured property filters ---
+  const BUCKET = "bbbbbbbb-2222-3333-4444-555555555555";
+
+  it("AND-composes a bucket filter with the text match", () => {
+    const { filter, scopeFilter } = buildSearchFilter(PROJECT, "Marcin", "description", {
+      bucketId: BUCKET,
+    });
+    expect(filter).toContain("_msdyn_projectbucket_value eq " + BUCKET);
+    expect(filter).toContain("contains(msdyn_description,'Marcin')");
+    expect(filter).toMatch(/ and contains\(msdyn_description/);
+    // scopeFilter keeps the bucket predicate but drops the text predicate.
+    expect(scopeFilter).toContain("_msdyn_projectbucket_value eq " + BUCKET);
+    expect(scopeFilter).not.toContain("contains(");
+  });
+
+  it("composes multiple property filters", () => {
+    const { filter } = buildSearchFilter(PROJECT, undefined, "both", {
+      isMilestone: true,
+      priorityMin: 5,
+      priorityMax: 9,
+      progressMin: 0.5,
+      effortMax: 8,
+    });
+    expect(filter).toContain("msdyn_ismilestone eq true");
+    expect(filter).toContain("msdyn_priority ge 5");
+    expect(filter).toContain("msdyn_priority le 9");
+    expect(filter).toContain("msdyn_progress ge 0.5");
+    expect(filter).toContain("msdyn_effort le 8");
+  });
+
+  it("allows an omitted query when a property filter is present (filter === scopeFilter)", () => {
+    const { filter, scopeFilter, terms } = buildSearchFilter(PROJECT, undefined, "both", {
+      bucketId: BUCKET,
+    });
+    expect(terms).toEqual([]);
+    expect(filter).not.toContain("contains(");
+    expect(filter).toBe(scopeFilter);
+  });
+
+  it("throws when NEITHER a query NOR any filter is given", () => {
+    expect(() => buildSearchFilter(PROJECT, undefined)).toThrow(/query is required/);
+    expect(() => buildSearchFilter(PROJECT, "   ", "both", {})).toThrow(/query is required/);
+  });
+
+  it("rejects a malformed GUID filter", () => {
+    expect(() => buildSearchFilter(PROJECT, "x", "both", { bucketId: "not-a-guid" })).toThrow(
+      /bucketId must be a GUID/,
+    );
+    expect(() => buildSearchFilter(PROJECT, "x", "both", { parentTaskId: "nope" })).toThrow(
+      /parentTaskId must be a GUID/,
+    );
+  });
+
+  it("canonicalises date filters and rejects unparseable ones", () => {
+    const { filter } = buildSearchFilter(PROJECT, undefined, "both", { finishBefore: "2026-07-01" });
+    expect(filter).toContain("msdyn_finish lt 2026-07-01T00:00:00.000Z");
+    expect(() => buildSearchFilter(PROJECT, undefined, "both", { startAfter: "not-a-date" })).toThrow(
+      /ISO-8601/,
+    );
   });
 });
 
@@ -260,5 +321,42 @@ describe("search_plan_tasks handler", () => {
     // injected operators are percent-encoded, never bare OData.
     expect(urls[0]).toContain("contains(msdyn_subject,'''");
     expect(urls[0]).not.toContain("') or (1 eq 1'"); // no un-encoded breakout
+  });
+
+  it("pushes a bucket property filter server-side and echoes appliedFilters", async () => {
+    const BUCKET = "bbbbbbbb-2222-3333-4444-555555555555";
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      urls.push(String(input));
+      return jsonRes({ value: [row()] });
+    });
+    const r = await call({ projectId: PROJECT, query: "Marcin", fields: "description", bucketId: BUCKET });
+    expect(r.ok).toBe(true);
+    expect(r.appliedFilters).toEqual({ bucketId: BUCKET });
+    expect(urls.some((u) => u.includes("_msdyn_projectbucket_value eq " + BUCKET))).toBe(true);
+    expect(urls.some((u) => u.includes("contains(msdyn_description,'Marcin')"))).toBe(true);
+  });
+
+  it("runs a filter-only search with no text query", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      urls.push(String(input));
+      return jsonRes({ value: [row({ msdyn_ismilestone: true })] });
+    });
+    const r = await call({ projectId: PROJECT, isMilestone: true });
+    expect(r.ok).toBe(true);
+    expect(r.terms).toEqual([]);
+    expect(r.searchedNotesServerSide).toBe(false);
+    expect(urls.some((u) => u.includes("msdyn_ismilestone eq true"))).toBe(true);
+    expect(urls.every((u) => !u.includes("contains("))).toBe(true);
+  });
+
+  it("rejects actuals filters when extended fields are known absent", async () => {
+    setExtendedTaskFieldsCapability("absent");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await expect(call({ projectId: PROJECT, actualStartAfter: "2026-01-01" })).rejects.toThrow(
+      /actual start\/finish filters/,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
