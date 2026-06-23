@@ -166,6 +166,25 @@ describe("buildSearchFilter", () => {
       /ISO-8601/,
     );
   });
+
+  it("treats blank-string GUID/date filters as absent (hosts that can't omit fields)", () => {
+    // A date-window-only search with empty-string GUIDs must NOT throw the GUID
+    // error - the blanks are ignored and only the date predicates are emitted.
+    const { filter } = buildSearchFilter(PROJECT, undefined, "both", {
+      bucketId: "",
+      sprintId: "   ",
+      parentTaskId: "",
+      finishAfter: "2026-06-29",
+      finishBefore: "2026-07-06",
+    });
+    expect(filter).toContain("msdyn_finish ge 2026-06-29T00:00:00.000Z");
+    expect(filter).toContain("msdyn_finish lt 2026-07-06T00:00:00.000Z");
+    expect(filter).not.toContain("_msdyn_projectbucket_value");
+    expect(filter).not.toContain("_msdyn_projectsprint_value");
+    // A blank date is ignored too (not parsed).
+    const r2 = buildSearchFilter(PROJECT, "x", "both", { startAfter: "" });
+    expect(r2.filter).not.toContain("msdyn_start");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -358,5 +377,31 @@ describe("search_plan_tasks handler", () => {
       /actual start\/finish filters/,
     );
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("runs a date-window search when the host sends blank GUID/actuals strings", async () => {
+    // Capability absent, but the actuals fields are blank ("") so the gate must
+    // NOT fire; the blank GUIDs are ignored and the finish window is pushed down.
+    setExtendedTaskFieldsCapability("absent");
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      urls.push(String(input));
+      return jsonRes({ value: [row()] });
+    });
+    const r = await call({
+      projectId: PROJECT,
+      bucketId: "",
+      sprintId: "",
+      parentTaskId: "",
+      actualStartAfter: "",
+      finishAfter: "2026-06-29",
+      finishBefore: "2026-07-06",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.appliedFilters).toEqual({ finishAfter: "2026-06-29", finishBefore: "2026-07-06" });
+    expect(urls.some((u) => u.includes("msdyn_finish ge 2026-06-29T00:00:00.000Z"))).toBe(true);
+    expect(urls.some((u) => u.includes("msdyn_finish lt 2026-07-06T00:00:00.000Z"))).toBe(true);
+    // No bucket PREDICATE (the column still appears in $select, so match "… eq").
+    expect(urls.every((u) => !u.includes("_msdyn_projectbucket_value eq"))).toBe(true);
   });
 });

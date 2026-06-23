@@ -77,13 +77,16 @@ export interface SearchTaskFilters {
   actualFinishBefore?: string;
 }
 
-/** True when any actuals-based filter (Project-Operations-only fields) is set. */
+/** True when any actuals-based filter (Project-Operations-only fields) is set to
+ * a non-blank value. A blank string ("") means the caller did not set it - some
+ * MCP hosts cannot omit an optional field and send "" instead. */
 export function usesActualsFilters(f: SearchTaskFilters): boolean {
+  const set = (v: string | undefined) => typeof v === "string" && v.trim() !== "";
   return (
-    f.actualStartAfter != null ||
-    f.actualStartBefore != null ||
-    f.actualFinishAfter != null ||
-    f.actualFinishBefore != null
+    set(f.actualStartAfter) ||
+    set(f.actualStartBefore) ||
+    set(f.actualFinishAfter) ||
+    set(f.actualFinishBefore)
   );
 }
 
@@ -151,13 +154,24 @@ export function buildSearchFilter(
 
   // Structured property predicates (AND-composed). GUIDs are validated; dates are
   // canonicalised; numbers/bools are already type-checked at the tool boundary.
+  // Some MCP hosts cannot OMIT an optional field and instead send an empty string
+  // ("") for it. Treat a blank/whitespace string filter as "not provided" rather
+  // than validating it - so a date-only search can pass bucketId/sprintId/
+  // parentTaskId as "" without tripping the GUID check. A non-blank, non-GUID
+  // value is still a real mistake and is rejected.
+  const blank = (v: string | undefined): boolean => v == null || v.trim() === "";
+
   const structured: string[] = [];
   const guidPred = (val: string | undefined, label: string, field: string) => {
-    if (val == null) return;
-    const v = val.trim();
+    if (blank(val)) return;
+    const v = (val as string).trim();
     if (!isGuid(v))
       throw new Error(label + " must be a GUID - resolve it with a read tool (do not guess or pass a name).");
     structured.push(field + " eq " + v);
+  };
+  const datePred = (val: string | undefined, label: string, field: string, op: "ge" | "lt") => {
+    if (blank(val)) return;
+    structured.push(field + " " + op + " " + odataDate((val as string).trim(), label));
   };
   guidPred(filters.bucketId, "bucketId", "_msdyn_projectbucket_value");
   guidPred(filters.sprintId, "sprintId", "_msdyn_projectsprint_value");
@@ -170,18 +184,14 @@ export function buildSearchFilter(
   if (filters.progressMax != null) structured.push("msdyn_progress le " + filters.progressMax);
   if (filters.effortMin != null) structured.push("msdyn_effort ge " + filters.effortMin);
   if (filters.effortMax != null) structured.push("msdyn_effort le " + filters.effortMax);
-  if (filters.startAfter != null) structured.push("msdyn_start ge " + odataDate(filters.startAfter, "startAfter"));
-  if (filters.startBefore != null) structured.push("msdyn_start lt " + odataDate(filters.startBefore, "startBefore"));
-  if (filters.finishAfter != null) structured.push("msdyn_finish ge " + odataDate(filters.finishAfter, "finishAfter"));
-  if (filters.finishBefore != null) structured.push("msdyn_finish lt " + odataDate(filters.finishBefore, "finishBefore"));
-  if (filters.actualStartAfter != null)
-    structured.push("msdyn_actualstart ge " + odataDate(filters.actualStartAfter, "actualStartAfter"));
-  if (filters.actualStartBefore != null)
-    structured.push("msdyn_actualstart lt " + odataDate(filters.actualStartBefore, "actualStartBefore"));
-  if (filters.actualFinishAfter != null)
-    structured.push("msdyn_actualfinish ge " + odataDate(filters.actualFinishAfter, "actualFinishAfter"));
-  if (filters.actualFinishBefore != null)
-    structured.push("msdyn_actualfinish lt " + odataDate(filters.actualFinishBefore, "actualFinishBefore"));
+  datePred(filters.startAfter, "startAfter", "msdyn_start", "ge");
+  datePred(filters.startBefore, "startBefore", "msdyn_start", "lt");
+  datePred(filters.finishAfter, "finishAfter", "msdyn_finish", "ge");
+  datePred(filters.finishBefore, "finishBefore", "msdyn_finish", "lt");
+  datePred(filters.actualStartAfter, "actualStartAfter", "msdyn_actualstart", "ge");
+  datePred(filters.actualStartBefore, "actualStartBefore", "msdyn_actualstart", "lt");
+  datePred(filters.actualFinishAfter, "actualFinishAfter", "msdyn_actualfinish", "ge");
+  datePred(filters.actualFinishBefore, "actualFinishBefore", "msdyn_actualfinish", "lt");
 
   if (terms.length === 0 && structured.length === 0)
     throw new Error(
@@ -222,7 +232,7 @@ export const searchPlanTasks: ToolDef = {
   name: "search_plan_tasks",
   title: "Search Plan Tasks (text)",
   description:
-    "Server-side TEXT SEARCH within ONE plan: returns only the tasks whose title (msdyn_subject) and/or notes (msdyn_description) CONTAIN the query, by pushing an OData contains() filter to Dataverse. Use THIS to find tasks that mention a word, name, date or phrase (e.g. a person's name in the notes) - do NOT page through get_plan_tasks_and_buckets or list_plan_tasks and grep client-side. Matching is case-insensitive substring. Pass `query` as a single string, OR as an ARRAY of terms to match ANY of them in one call (OR) - prefer this over client-side grep alternation, which is unreliable on some hosts. Searches both title and notes by default; set `fields` to 'subject' or 'description' to narrow. `query` is OPTIONAL when you supply at least one PROPERTY FILTER - all AND-composed with the text match: `bucketId`, `sprintId`, `parentTaskId` (GUIDs - you MUST resolve these to real GUIDs first via get_plan_tasks_and_buckets / list_plan_tasks / get_task; never guess a GUID or pass a display name), `isMilestone` (bool), `priorityMin`/`priorityMax` (int), `progressMin`/`progressMax` (0-1 fraction, 0.5 = 50%), `effortMin`/`effortMax` (hours), and date windows `startAfter`/`startBefore`/`finishAfter`/`finishBefore` (and actuals `actualStartAfter`/`actualStartBefore`/`actualFinishAfter`/`actualFinishBefore`, which need a Project Operations tenant) as ISO-8601 dates. Example - notes containing 'Marcin' in one bucket: query:'Marcin', fields:'description', bucketId:<that bucket's GUID>. If a needed GUID or date is not given to you, CALL THE RIGHT READ TOOL to obtain it before searching rather than guessing. Optional `filter` 'all'|'overdue'|'milestones' (as in list_plan_tasks) further narrows the matched rows. Returns the same task shape as list_plan_tasks (taskId, subject, description preview, bucket, dates, progress, …). Size-capped and paged: at most " +
+    "Server-side TEXT SEARCH within ONE plan: returns only the tasks whose title (msdyn_subject) and/or notes (msdyn_description) CONTAIN the query, by pushing an OData contains() filter to Dataverse. Use THIS to find tasks that mention a word, name, date or phrase (e.g. a person's name in the notes) - do NOT page through get_plan_tasks_and_buckets or list_plan_tasks and grep client-side. Matching is case-insensitive substring. Pass `query` as a single string, OR as an ARRAY of terms to match ANY of them in one call (OR) - prefer this over client-side grep alternation, which is unreliable on some hosts. Searches both title and notes by default; set `fields` to 'subject' or 'description' to narrow. `query` is OPTIONAL when you supply at least one PROPERTY FILTER - all AND-composed with the text match: `bucketId`, `sprintId`, `parentTaskId` (GUIDs - you MUST resolve these to real GUIDs first via get_plan_tasks_and_buckets / list_plan_tasks / get_task; never guess a GUID or pass a display name), `isMilestone` (bool), `priorityMin`/`priorityMax` (int), `progressMin`/`progressMax` (0-1 fraction, 0.5 = 50%), `effortMin`/`effortMax` (hours), and date windows `startAfter`/`startBefore`/`finishAfter`/`finishBefore` (and actuals `actualStartAfter`/`actualStartBefore`/`actualFinishAfter`/`actualFinishBefore`, which need a Project Operations tenant) as ISO-8601 dates. Example - notes containing 'Marcin' in one bucket: query:'Marcin', fields:'description', bucketId:<that bucket's GUID>. If a needed GUID or date is not given to you, CALL THE RIGHT READ TOOL to obtain it before searching rather than guessing. Any optional filter you do NOT want is best omitted, but a blank/empty string ('') is also accepted and simply ignored (so a date-window-only search can leave bucketId/sprintId/parentTaskId empty). Note this tool CANNOT filter by assignee - to find a particular PERSON's tasks use list_user_tasks / list_my_tasks (which key on the assignee), optionally cross-referencing taskIds. Optional `filter` 'all'|'overdue'|'milestones' (as in list_plan_tasks) further narrows the matched rows. Returns the same task shape as list_plan_tasks (taskId, subject, description preview, bucket, dates, progress, …). Size-capped and paged: at most " +
     SAFE_PAGE_SIZE +
     " tasks per page (shrinks further when notes are large) - KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). LIMITATION: notes are stored HTML-entity-encoded, so a term containing quotes, ampersands or angle-brackets (\" & ' < >) may not match the human-readable text - search a plain-text fragment instead; the response warns when a term contains such characters. A long note is clipped to a preview (descriptionTruncated:true) - fetch full text via get_task. If truncated=true the underlying 10,000-row scan was incomplete.",
   inputSchema: {
@@ -381,7 +391,9 @@ export const searchPlanTasks: ToolDef = {
     toolWarnings.push(...built.warnings);
 
     const appliedFilters = Object.fromEntries(
-      Object.entries(filters).filter(([, v]) => v !== undefined),
+      Object.entries(filters).filter(
+        ([, v]) => v !== undefined && !(typeof v === "string" && v.trim() === ""),
+      ),
     );
 
     const CORE_SELECT =
