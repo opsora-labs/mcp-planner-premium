@@ -82,13 +82,13 @@ means the server is not dangerous even when used from a host with no skill loade
 
 | Tool (MCP name) | Description |
 |---|---|
-| `create_plan` | Create a new plan |
+| `create_plan` | Create a new plan (optional `customFields` — see [Custom Dataverse columns](#custom-dataverse-columns), unverified live) |
 | `add_bucket` | Add a bucket to a plan |
 | `add_sprint` | Add a sprint (name + start + finish) to a plan |
 | `start_change_session` | Open a change session; returns `operationSetId` |
-| `add_tasks` | Add tasks (+ checklist, sprint, labels, assignees) — ergonomic, **preferred** |
+| `add_tasks` | Add tasks (+ checklist, sprint, labels, assignees, optional `customFields`) — ergonomic, **preferred** |
 | `add_tasks_batch` | Add tasks — raw OData, advanced escape hatch |
-| `update_tasks` | Update tasks — ergonomic, **preferred** |
+| `update_tasks` | Update tasks (optional `customFields`) — ergonomic, **preferred** |
 | `update_tasks_batch` | Update tasks — raw OData, advanced escape hatch |
 | `delete_tasks_batch` | Delete tasks, dependencies, buckets, or assignments |
 | `apply_changes` | Commit a change session |
@@ -110,6 +110,8 @@ means the server is not dangerous even when used from a host with no skill loade
 | `list_dependencies` | All predecessor→successor links (type + lag) — read |
 | `list_team_members` | All plan team members, each with `bookableResourceId` + UPN/email/full name — read |
 | `describe_option_set` | Choice-column values + labels (e.g. link types, status) — read |
+| `list_custom_columns` | Discover customer-added (non-`msdyn_`) columns on a plan or task, via live metadata — read, opt-in (see [Custom Dataverse columns](#custom-dataverse-columns)) |
+| `describe_columns` | Deep detail (type, option list, date format, lookup nav/targets) for named custom columns — read, opt-in |
 | `get_critical_path` | Critical-path chain with per-task total float (slack) in working days — read |
 | `get_schedule_health` | Schedule-risk rollup: overdue, at-risk, blocked, milestones, slipping summaries — read |
 | `get_resource_workload` | Per-team-member assigned-task count, effort hours, and overdue count — read |
@@ -162,6 +164,54 @@ The same approach is applied wherever the model was writing raw OData:
 
 The other 9 tools already take plain scalars, so they need no wrapper.
 
+## Custom Dataverse columns
+
+Customers on full Project Plan 3/5 licenses often add **custom columns**
+(publisher-prefixed, e.g. `new_riskscore`, `contoso_category`) to the plan
+(`msdyn_project`) or task (`msdyn_projecttask`) entity. This server can read
+and write them, entirely **opt-in** and off by default:
+
+- Set `CUSTOM_COLUMNS_MODE=metadata` (or `metadata+allowlist`, see
+  [Configuration](#configuration)) to turn the feature on. With the default
+  `off`, `customFields`/`includeCustomColumns` are ignored and every existing
+  tool signature and output is byte-for-byte unchanged.
+- **Discover first.** Call `list_custom_columns` (`entity: "project"` or
+  `"task"`) to see what's actually on your tenant — logical name, normalized
+  type, whether it's writable, option-set labels, lookup targets. Use
+  `describe_columns` for deep detail on specific columns.
+- **Read.** Pass `includeCustomColumns: true` (or an array of specific logical
+  names) to `get_task`, `list_plan_tasks`, or `get_plan_summary`. Values come
+  back label-shaped (`{ value, label }` for choices, `{ id, logicalName, name }`
+  for lookups) under a `customFields` object, degrading gracefully to core
+  fields only if metadata can't be read or a column was renamed/removed.
+- **Write.** Pass `customFields: { "new_riskscore": 7, "new_category": "High" }`
+  to `add_tasks`, `update_tasks`, or `create_plan`. Values are label-friendly:
+  a picklist accepts its label or integer value; a lookup accepts a bare GUID
+  (when the column has a single target) or `{ target, id }`. The server
+  resolves each key's type from live Dataverse metadata and serializes it
+  correctly (including the `<NavProperty>@odata.bind` form lookups require —
+  never the logical name). Any key starting with `msdyn_` is rejected — that
+  channel is for customer-added columns only, never a way around the standard
+  named parameters or their guardrails (summary-task protection, blocked-on-create
+  fields, the 200-entity cap all still apply to the same batch).
+- **`create_plan`'s `customFields` is unverified against a live tenant** — this
+  server's test tenant has no real custom columns, so whether
+  `msdyn_CreateProjectV1` accepts custom columns on create is unproven. It is
+  implemented and gated the same way as `add_tasks`/`update_tasks`, and fails
+  closed with a clear error if metadata can't be resolved; if PSS itself
+  rejects a custom field on plan create, set it afterwards via
+  `update_tasks_batch` (`@odata.type: Microsoft.Dynamics.CRM.msdyn_project`).
+- **Fail-closed, not silent.** If metadata can't be read (missing privilege,
+  tenant lockdown) or a column can't be resolved/serialized, the write is
+  rejected with a specific, actionable error — never a silent drop or partial
+  write.
+- The raw `add_tasks_batch`/`update_tasks_batch` tools get the same protection:
+  when `CUSTOM_COLUMNS_MODE!=off`, any non-`msdyn_` key in a raw entity is
+  validated against metadata (writable, not computed, correct nav-property
+  bind key for lookups) and rejected with a teachable error instead of being
+  passed through to PSS unchecked — a strengthening of the existing allow-list,
+  not a new bypass.
+
 ## Configuration
 
 Validated once at boot with a zod schema (fail-fast — a bad value crashes the
@@ -181,9 +231,12 @@ container loudly instead of failing per-request).
 | `RATE_LIMIT_PER_MIN` | no | `120` | Per-IP requests/min on `/mcp` |
 | `JSON_BODY_LIMIT` | no | `2mb` | Max request body |
 | `LOG_LEVEL` | no | `info` | pino level |
-| `READ_ONLY_MODE` | no | `false` | When `true`, exposes only the 17 read-only tools and hard-rejects any write/session tool call. Useful for a reporting-only deployment. Accepts `true/1/yes/on` (case-insensitive); invalid values crash at boot. |
+| `READ_ONLY_MODE` | no | `false` | When `true`, exposes only the read-only tools (`readOnlyHint:true` in `src/tools/index.ts`, including `list_custom_columns`/`describe_columns`) and hard-rejects any write/session tool call. Useful for a reporting-only deployment. Accepts `true/1/yes/on` (case-insensitive); invalid values crash at boot. |
 | `ENABLED_TOOLS` | no | — | Comma-separated allowlist of exact tool names. When set, only those tools are exposed. Unknown names crash at boot (fail-closed). |
 | `TOOLSETS` | no | — | Comma-separated list of named tool groups to expose: `reporting` (list views), `discovery` (lookup/identity), `sessions` (change-session lifecycle), `write` (structural writes), `analytics` (schedule and resource insights — overlaps `reporting`). Union of all selected groups is taken. Unknown group names crash at boot (fail-closed). All three controls are AND-ed: a tool must pass READ_ONLY_MODE, ENABLED_TOOLS, and TOOLSETS to be registered. |
+| `CUSTOM_COLUMNS_MODE` | no | `off` | `off` = custom-column read/discovery/write disabled entirely (default, zero behaviour change). `metadata` = any non-`msdyn_` column discoverable via live Dataverse metadata is eligible for `customFields`/`includeCustomColumns`. `metadata+allowlist` = metadata-eligible AND present in `CUSTOM_COLUMNS_ALLOWLIST`. See [Custom Dataverse columns](#custom-dataverse-columns). |
+| `CUSTOM_COLUMNS_ALLOWLIST` | no | — | Comma list of custom-column logical names, used only when `CUSTOM_COLUMNS_MODE=metadata+allowlist`, to further restrict which discovered columns are actually usable. |
+| `CUSTOM_COLUMNS_METADATA_TTL_MS` | no | (none — cached for process lifetime) | Optional TTL for the custom-column metadata cache. Schema is normally stable within a deployment (same rationale as the capability cache); set this only if you're actively iterating on custom-column schema on a live server. |
 
 **Deployment hardening note:** combine `READ_ONLY_MODE=true` (or `TOOLSETS=reporting,discovery,analytics`) with
 network-ingress restrictions (see Deploy section) to run a safe reporting-only instance that cannot

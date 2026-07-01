@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, asArray } from "../dataverse.js";
+import { validateCustomColumnKeys } from "./customColumnsGuard.js";
 import type { ToolDef } from "./types.js";
 
 const BLOCKED_PROJECT_FIELDS = [
@@ -188,6 +189,11 @@ export const updateTasks: ToolDef = {
 
     const entities = asArray(input.entities, "entities");
     validateUpdateEntities(entities, input.summaryTaskIds);
+    // Additional, opt-in (CUSTOM_COLUMNS_MODE!=off) metadata-backed check for
+    // any custom (non-msdyn_) key — see customColumnsGuard.ts. Runs AFTER the
+    // synchronous guardrails above, so the dependency-block / summary-task /
+    // 200-cap checks always fire first, unchanged.
+    await validateCustomColumnKeys(entities, "update");
 
     const response = await dvReq({
       url: BASE + "/msdyn_PssUpdateV2",

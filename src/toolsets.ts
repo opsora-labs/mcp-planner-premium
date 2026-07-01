@@ -32,6 +32,8 @@ export const TOOLSETS: Record<string, readonly string[]> = {
     "list_team_members",
     "whoami",
     "describe_option_set",
+    "list_custom_columns",
+    "describe_columns",
   ],
   sessions: [
     "start_change_session",

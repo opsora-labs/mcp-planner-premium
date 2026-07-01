@@ -6,6 +6,7 @@ import {
   asArray,
   throwIfPssCreateError,
 } from "../dataverse.js";
+import { validateCustomColumnKeys } from "./customColumnsGuard.js";
 import type { ToolDef } from "./types.js";
 
 const ALLOWED = [
@@ -300,6 +301,11 @@ export const addTasks: ToolDef = {
 
     const entities = asArray(input.entities, "entities");
     validateAddEntities(entities);
+    // Additional, opt-in (CUSTOM_COLUMNS_MODE!=off) metadata-backed check for
+    // any custom (non-msdyn_) key — see customColumnsGuard.ts. Runs AFTER the
+    // synchronous guardrails above, so the allow-list / blocked-on-create /
+    // bind-alias / 200-cap checks always fire first, unchanged.
+    await validateCustomColumnKeys(entities, "create");
 
     const response = await dvReq({
       url: BASE + "/msdyn_PssCreateV2",

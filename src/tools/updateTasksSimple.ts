@@ -1,8 +1,10 @@
 import { z } from "zod";
-import { getApiBase } from "../config.js";
+import { getApiBase, getCustomColumnsMode } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, asArray, assertGuid } from "../dataverse.js";
 import { validateUpdateEntities } from "./updateTasks.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
+import { getEntityMetadata } from "../dataverse/metadata.js";
+import { spliceCustomFields, type ResolveCustomColumn } from "./addTasksSimple.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
@@ -28,6 +30,10 @@ export interface SimpleTaskUpdate {
    * Removing a task from a sprint (null sprint) is not supported — PSS rejects
    * null lookup binds; pass null to get a warning and no change. */
   sprint?: string;
+  /** Custom (non-msdyn_) column values, keyed by logical name. Requires
+   * CUSTOM_COLUMNS_MODE!=off on the server. See addTasksSimple.ts's SimpleTask
+   * for the exact resolution/codec behaviour (shared via spliceCustomFields). */
+  customFields?: Record<string, unknown>;
 }
 
 export interface BuiltUpdate {
@@ -53,6 +59,7 @@ export function buildUpdateEntities(
   tasks: SimpleTaskUpdate[],
   resolvedBucketIds?: Map<number, string>,
   resolvedSprintIds?: Map<number, string>,
+  resolveCustomColumn?: ResolveCustomColumn,
 ): BuiltUpdate {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
@@ -191,6 +198,7 @@ export function buildUpdateEntities(
         changed++;
       }
     }
+    if (t.customFields && Object.keys(t.customFields).length > 0) changed++;
     if (changed === 0)
       throw new Error(
         "tasks[" +
@@ -201,6 +209,13 @@ export function buildUpdateEntities(
             : "") +
           ".",
       );
+
+    // Custom (non-msdyn_) columns — resolved via metadata + the columnTypes.ts
+    // codec, spliced in as extra keys on the same task entity. Fails closed
+    // with a specific error (never a silent drop) on an msdyn_* key, an
+    // unresolved column, or a bad value.
+    spliceCustomFields(ent, t.customFields, "update", resolveCustomColumn, "tasks[" + i + "]");
+
     return ent;
   });
 
@@ -242,6 +257,12 @@ const updateSchema = z.object({
     .optional()
     .describe(
       "Move the task into a sprint: sprint NAME (resolved against the plan) or a sprintId GUID. Requires projectId at the top level for name resolution; pass a sprintId GUID to skip the lookup. Create the sprint first with add_sprint. Removing a task from a sprint (sprint=null) is NOT supported and is ignored with a warning.",
+    ),
+  customFields: z
+    .record(z.unknown())
+    .optional()
+    .describe(
+      "Custom (non-msdyn_) Dataverse column values, keyed by logical name, e.g. {\"new_riskscore\": 9}. Requires CUSTOM_COLUMNS_MODE!=off on the server. Picklist accepts a label or an integer value; lookups accept a bare GUID (when the column has a single target) or {target,id}. Use list_custom_columns / describe_columns to discover valid names and types first. Standard msdyn_ fields are rejected here — use this tool's named parameters for those.",
     ),
 });
 
@@ -391,7 +412,22 @@ export const updateTasksSimple: ToolDef = {
       });
     }
 
-    const { entities, warnings } = buildUpdateEntities(tasks, resolvedBucketIds, resolvedSprintIds);
+    // Custom (non-msdyn_) columns: fetch metadata for msdyn_projecttask ONLY if
+    // any task actually uses customFields, and only when the feature is enabled
+    // (CUSTOM_COLUMNS_MODE!=off) — keeps the default path byte-for-byte
+    // unchanged and avoids an unnecessary metadata round-trip otherwise.
+    const wantsCustomFields = tasks.some((t) => t.customFields && Object.keys(t.customFields).length > 0);
+    let resolveCustomColumn: ResolveCustomColumn | undefined;
+    if (wantsCustomFields) {
+      if (getCustomColumnsMode() === "off")
+        throw new Error(
+          "customFields was provided but CUSTOM_COLUMNS_MODE is 'off' on this server. Ask the server operator to set CUSTOM_COLUMNS_MODE=metadata (or metadata+allowlist), or remove customFields.",
+        );
+      const entityMeta = await getEntityMetadata("msdyn_projecttask");
+      resolveCustomColumn = (logicalName: string) => entityMeta.columns.get(logicalName);
+    }
+
+    const { entities, warnings } = buildUpdateEntities(tasks, resolvedBucketIds, resolvedSprintIds, resolveCustomColumn);
 
     // Auto-detect summary tasks from the plan hierarchy when projectId is provided.
     // This lets the guard fire without requiring a prior get_plan_tasks_and_buckets

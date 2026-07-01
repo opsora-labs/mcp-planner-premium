@@ -87,7 +87,8 @@ next step, not a deferred one.
 | 5.2 Token redaction in logs | ✅ Done | pino `redact` ([`src/logger.ts`](src/logger.ts)); verified by test output. |
 | 5.3 Ingress restriction to known caller | ❌ Not done (operator action) | Recommended: restrict the Azure Container Apps ingress to the egress IP range(s) of the MCP host(s), or use internal ingress for a dedicated deployment. More important now that multiple hosts connect (§1). This is an Azure deployment-time control, not code. Documented in README. |
 | 5.4 No secrets committed to the repo | ✅ Done | No credentials, tenant ids or org URLs in source - only example placeholders (`contoso`, all-zero GUIDs). `.env` and build artifacts are gitignored. |
-| 5.5 Read-only and scoped-toolset deployment | ✅ Done | `READ_ONLY_MODE=true` filters the server to the 19 read-only tools (of 31 total) at registration time and adds a call-time hard-reject for any write/session tool call — a reporting-only instance cannot write to Planner regardless of the bearer token's permissions. `ENABLED_TOOLS` and `TOOLSETS` provide an explicit allowlist and named-group allowlist respectively. All three controls are AND-ed; the classification derives from `readOnlyHint` in `src/tools/index.ts` (single source of truth). Unknown names/groups fail closed at boot — a misconfigured allowlist crashes the container rather than silently exposing nothing or everything. `/healthz` reports `readOnly` and `toolCount` for operator verification without an MCP handshake. |
+| 5.5 Read-only and scoped-toolset deployment | ✅ Done | `READ_ONLY_MODE=true` filters the server to the read-only tools (22 of 32 total, including `list_custom_columns`/`describe_columns`) at registration time and adds a call-time hard-reject for any write/session tool call — a reporting-only instance cannot write to Planner regardless of the bearer token's permissions. `ENABLED_TOOLS` and `TOOLSETS` provide an explicit allowlist and named-group allowlist respectively. All three controls are AND-ed; the classification derives from `readOnlyHint` in `src/tools/index.ts` (single source of truth). Unknown names/groups fail closed at boot — a misconfigured allowlist crashes the container rather than silently exposing nothing or everything. `/healthz` reports `readOnly` and `toolCount` for operator verification without an MCP handshake. |
+| 5.6 Custom Dataverse column metadata privilege | ✅ Done | Discovering/reading/writing custom (non-`msdyn_`) columns (`CUSTOM_COLUMNS_MODE!=off`, §11) requires only `prvReadEntity`/`prvReadAttribute` on entity/attribute metadata — a read privilege normally held by any user who can read the record at all, so no elevated grant is needed. If the tenant locks this down and the metadata read 403s, custom-column writes fail closed with an actionable error (§11); standard `msdyn_` fields are entirely unaffected either way. |
 
 ---
 
@@ -140,7 +141,27 @@ next step, not a deferred one.
 
 ---
 
-## 10. Test coverage of security controls
+## 11. Custom Dataverse columns (`CUSTOM_COLUMNS_MODE`)
+
+Custom (customer-added, non-`msdyn_`) Dataverse columns are an **opt-in**
+capability, default `off` (§5.5 note; see [`README.md`](README.md#custom-dataverse-columns)
+for the full feature description). Its security model:
+
+| Control | Status | Implementation / reason |
+|---|---|---|
+| Off by default, fully additive | ✅ Done | `CUSTOM_COLUMNS_MODE=off` (default) means `customFields`/`includeCustomColumns` inputs are ignored and no existing tool's behaviour or output changes at all ([`src/config.ts`](src/config.ts)). |
+| Metadata read privilege | ✅ Done | Only `prvReadEntity`/`prvReadAttribute` is required (§5.6) — a privilege normally implied by read access to the record itself. No elevated grant. |
+| **Prefix discipline (the custom-column gate)** | ✅ Done | A column enters the custom-column codec path **only if its logical name does not start with `msdyn_`** (`isCustomColumnName` in [`src/dataverse/metadata.ts`](src/dataverse/metadata.ts)). This was **deliberately not** gated on the Dataverse `IsCustomAttribute` flag — live probing showed nearly every standard `msdyn_` field on this tenant reports `IsCustomAttribute:true`, which would have made that flag admit almost the entire standard schema as "custom" and defeat the guardrail. Prefix discipline means the custom-column channel can **never** be used to reach a standard `msdyn_` field, so it cannot bypass the existing allow-list, blocked-on-create list, or summary-task protection — those guards keep operating on `msdyn_` fields exactly as before, completely independent of this feature. |
+| `customFields` never a bypass | ✅ Done | Any `msdyn_*` key inside `customFields` is rejected outright with a message pointing at the tool's proper named parameter ([`spliceCustomFields`](src/tools/addTasksSimple.ts)); it is never silently routed to a standard field. |
+| GUIDs validated before entering a URL fragment | ✅ Done | Lookup/customer/owner writes run the caller-supplied id through `assertGuid` (`src/dataverse.ts`) before it is placed into the `<NavProperty>@odata.bind` → `/entityset(guid)` fragment ([`src/dataverse/columnTypes.ts`](src/dataverse/columnTypes.ts)) — same rule as every other model-supplied GUID in this server. |
+| Nav-property (not logical name) resolved from metadata, never guessed | ✅ Done | The `@odata.bind` key for a lookup column is resolved from `ManyToOneRelationships` metadata (`ReferencingEntityNavigationPropertyName`), never hand-typed or derived by casing convention — closing the same nav-property casing trap already documented for standard fields (`docs/PSS-IMPLEMENTATION-LESSONS.md`). |
+| Raw-batch guardrail strengthening | ✅ Done | When `CUSTOM_COLUMNS_MODE!=off`, `add_tasks_batch`/`update_tasks_batch` validate every non-`msdyn_` key in a raw entity against metadata (writable, not computed, correct nav-bind key) and reject with a teachable error — turning a silent/cryptic PSS failure into a precise one ([`src/tools/customColumnsGuard.ts`](src/tools/customColumnsGuard.ts)). This check runs strictly **after** (in addition to, never instead of) the existing synchronous `validateAddEntities`/`validateUpdateEntities`, so the allow-list, blocked-on-create fields, bind-alias teaching, summary-task protection, and the 200-entity cap all still fire unchanged, with or without custom keys present. |
+| Fail-closed, never a silent drop | ✅ Done | If metadata can't be read (403/error) while `CUSTOM_COLUMNS_MODE=metadata`, the write of a custom column fails closed with an actionable message (ask for `prvReadAttribute`, or use `CUSTOM_COLUMNS_ALLOWLIST`); a column that resolves but is computed/read-only/unsupported-type is rejected with a specific reason, never silently dropped from the payload. Reads degrade gracefully instead (core fields only, with a warning) since a read producing less data is safe, but a write silently dropping a field is not. |
+| `create_plan`'s `customFields` — unverified live | ⚠️ Documented gap | This server's probe tenant has no real custom columns, so whether `msdyn_CreateProjectV1` accepts custom fields in its `Project` body on create is unproven. The path is implemented, gated identically to `add_tasks`/`update_tasks`, and fails closed the same way; if PSS itself rejects it live, the documented remedy is to set the field afterwards via `update_tasks_batch` on `msdyn_project` (already-permitted per §API3/API5). |
+
+---
+
+## 12. Test coverage of security controls
 
 | Control | Test |
 |---|---|
@@ -149,5 +170,7 @@ next step, not a deferred one.
 | Fail-fast config (validate mode without `TENANT_ID`) | [`test/http.test.ts`](test/http.test.ts) |
 | 405 on GET/DELETE `/mcp`, health, `tools/list` | [`test/http.test.ts`](test/http.test.ts) |
 | Guardrails (allow-lists, GUID, bind aliases, summary protection, delete confirm, 200-cap) | [`test/guardrails.test.ts`](test/guardrails.test.ts), [`test/buildTasks.test.ts`](test/buildTasks.test.ts), [`test/buildUpdate.test.ts`](test/buildUpdate.test.ts) |
+| Custom-column prefix discipline, codec correctness, fail-closed metadata degrade | [`test/columnTypes.test.ts`](test/columnTypes.test.ts), [`test/metadataCache.test.ts`](test/metadataCache.test.ts), [`test/customFieldsBuild.test.ts`](test/customFieldsBuild.test.ts) |
+| Raw-batch custom-column guardrail (reject computed/wrong-lookup-key, accept valid scalar, summary-task + 200-cap still fire with custom keys present) | [`test/customColumnsGuard.test.ts`](test/customColumnsGuard.test.ts) |
 
-Run: `npm test` (395 tests across 27 files, no network required).
+Run: `npm test` (see the count in the latest local run — grows as coverage is added; currently 600+ tests, no network required).
