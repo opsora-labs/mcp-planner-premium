@@ -59,6 +59,29 @@ export async function verifyTaskField(
   return data[field];
 }
 
+/**
+ * Read a task's checklist items directly from Dataverse (bypasses MCP).
+ * NOTE: uses the same `_msdyn_projecttaskid_value` filter the tool relies on — a
+ * 400 here is itself the signal that the inferred filter field is wrong
+ * (docs/plans/50 §6).
+ */
+export async function verifyChecklist(
+  taskId: string,
+  bearer: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<{ id: string; title: string; completed: boolean }[]> {
+  const data = await dvGet(
+    `/msdyn_projectchecklists?$select=msdyn_projectchecklistid,msdyn_name,msdyn_projectchecklistcompleted&$filter=_msdyn_projecttaskid_value eq ${taskId}`,
+    bearer,
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data.value ?? []).map((c: any) => ({
+    id: c.msdyn_projectchecklistid,
+    title: c.msdyn_name ?? "",
+    completed: c.msdyn_projectchecklistcompleted === true,
+  }));
+}
+
 /** Confirm a task no longer exists (returns true if deleted). */
 export async function verifyTaskDeleted(taskId: string, bearer: string): Promise<boolean> {
   const base = getConfig().DATAVERSE_ORG_URL + "/api/data/v9.2";

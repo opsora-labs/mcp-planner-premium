@@ -189,6 +189,48 @@ describe("buildUpdateEntities", () => {
   });
 });
 
+describe("buildUpdateEntities — checklist awareness", () => {
+  it("a checklist-only task produces NO task-update entity and does not throw", () => {
+    const { entities, warnings } = buildUpdateEntities([
+      { taskId: ID, checklist: ["Buy milk", { match: "x", completed: true }] },
+    ]);
+    expect(entities).toHaveLength(0);
+    expect(warnings).toEqual([]);
+  });
+
+  it("checklist is never emitted into the task entity; scalar changes still apply", () => {
+    const { entities } = buildUpdateEntities([
+      { taskId: ID, subject: "Renamed", checklist: ["Buy milk"] },
+    ]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0].msdyn_subject).toBe("Renamed");
+    expect("checklist" in entities[0]).toBe(false);
+  });
+
+  it("an empty checklist array with no other field still throws 'nothing to change'", () => {
+    expect(() => buildUpdateEntities([{ taskId: ID, checklist: [] }])).toThrow(
+      /nothing to change/,
+    );
+  });
+
+  it("mixes a checklist-only task with a scalar-change task (only the latter emits an entity)", () => {
+    const OTHER = "99999999-8888-7777-6666-555555555555";
+    const { entities } = buildUpdateEntities([
+      { taskId: ID, checklist: ["only checklist here"] },
+      { taskId: OTHER, progressPercent: 50 },
+    ]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0].msdyn_projecttaskid).toBe(OTHER);
+    expect(entities[0].msdyn_progress).toBe(0.5);
+  });
+
+  it("still validates the taskId GUID even for a checklist-only task", () => {
+    expect(() =>
+      buildUpdateEntities([{ taskId: "not-a-guid", checklist: ["x"] }]),
+    ).toThrow(/taskId must be a GUID/);
+  });
+});
+
 const SPRINT = "eeeeeeee-ffff-0000-1111-222222222222";
 
 describe("buildUpdateEntities — sprint field (F2)", () => {

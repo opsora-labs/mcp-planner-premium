@@ -188,7 +188,7 @@ any failure (and `KEEP_PLAN=1`) precisely for this.
 | Dependencies FS/SS/FF/SF + lag | ✅ leaf↔leaf only | `dependsOn`; EU values 0–3 |
 | Priority / effort / dates / bucket / notes | ✅ | task fields |
 | Progress | ✅ update-only | `update_tasks.progressPercent` (0–100 → 0–1) |
-| Checklist | ✅ | `add_tasks.checklist` → `msdyn_projectchecklist` |
+| Checklist | ✅ create/adjust/remove | `add_tasks.checklist` (create) + `update_tasks.checklist` add/adjust/remove → `msdyn_projectchecklist`. Create=PssCreateV2, adjust=PssUpdateV2, delete=PssDeleteV2; read/filter by `_msdyn_projecttaskid_value` — all confirmed live (docs/plans/50 §6, 2026-07-01) |
 | Sprint | ✅ | `add_sprint` + `add_tasks.sprint` (task lookup) |
 | Assignees | ✅ existing team members | `add_tasks.assignees` → `msdyn_resourceassignment` |
 | Labels | ⚠️ assign-only | creation is UI-only |

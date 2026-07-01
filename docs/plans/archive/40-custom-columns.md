@@ -1,7 +1,7 @@
 # Custom Dataverse Column Support — Architecture Design
 
 **Target repo:** `mcp-planner-premium`
-**Status:** Proposed.
+**Status:** Shipped (merged in PR #1) — archived 2026-07-01.
 **Author perspective:** metadata-driven, guardrail-preserving, additive.
 
 ## 1. Problem & goal

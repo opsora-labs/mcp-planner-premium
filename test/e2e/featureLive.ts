@@ -12,7 +12,8 @@
  *   2. READ_ONLY_MODE (always): a second server booted with READ_ONLY_MODE=true
  *      must advertise only the read-only tools and reject a write tool.
  *   3. Writes (only when E2E_ALLOW_WRITES=true): create a tiny plan, then exercise
- *      assign_task (assign+unassign+confirmed gate), sprint-on-update_tasks, and
+ *      assign_task (assign+unassign+confirmed gate), sprint-on-update_tasks,
+ *      checklist add/adjust/remove-on-update_tasks (+confirmed gate), and
  *      delete_tasks_batch dependency cascade — each verified via OData. The plan
  *      is kept on failure (PSS blocks whole-plan delete); tasks are cleaned up.
  *
@@ -28,6 +29,7 @@ import { getConfig, redact } from "./config.js";
 import { mcpCall, mcpInitialize, mcpToolNames } from "./mcpClient.js";
 import {
   verifyAssignmentCount,
+  verifyChecklist,
   verifyDependencyCount,
   verifyTaskDeleted,
   verifyTaskField,
@@ -279,6 +281,58 @@ async function runWriteTier(bearer: string, port: number): Promise<void> {
       await call(url, "apply_changes", { operationSetId: s.operationSetId }, bearer);
       const sprintVal = await verifyTaskField(t1, "_msdyn_projectsprint_value", bearer);
       ok(!!sprintVal, "update_tasks sprint → OData sprint lookup set", String(sprintVal).slice(0, 8));
+    }
+
+    // checklist add / adjust / remove via update_tasks (docs/plans/50).
+    // Proves the two live-unproven assumptions: the checklist READ filter field
+    // and PssUpdateV2 accepting a checklist edit.
+    {
+      // ADD two items on t1.
+      s = await call(url, "start_change_session", { projectId, description: "checklist add" }, bearer);
+      const added = await call(url, "update_tasks", {
+        operationSetId: s.operationSetId, projectId,
+        tasks: [{ taskId: t1, checklist: ["Chk A", { title: "Chk B", completed: false }] }],
+      }, bearer);
+      await call(url, "apply_changes", { operationSetId: s.operationSetId }, bearer);
+      ok(added?.checklist?.added === 2, "update_tasks checklist add (2 items)", JSON.stringify(added?.checklist));
+      let items = await verifyChecklist(t1, bearer);
+      ok(items.length === 2, "OData: 2 checklist items present", `n=${items.length}`);
+
+      // get_task surfaces the items with ids + completed state.
+      const gt = await call(url, "get_task", { taskId: t1 }, bearer);
+      ok(Array.isArray(gt.checklist) && gt.checklist.length === 2, "get_task returns checklist items", `n=${gt.checklist?.length}`);
+
+      // ADJUST: tick "Chk A" complete (by match) and rename "Chk B" → "Chk B2".
+      s = await call(url, "start_change_session", { projectId, description: "checklist adjust" }, bearer);
+      await call(url, "update_tasks", {
+        operationSetId: s.operationSetId, projectId,
+        tasks: [{ taskId: t1, checklist: [
+          { match: "Chk A", completed: true },
+          { match: "Chk B", title: "Chk B2" },
+        ] }],
+      }, bearer);
+      await call(url, "apply_changes", { operationSetId: s.operationSetId }, bearer);
+      items = await verifyChecklist(t1, bearer);
+      const chkA = items.find((i) => i.title === "Chk A");
+      const chkB2 = items.find((i) => i.title === "Chk B2");
+      ok(!!chkA?.completed, "PssUpdateV2 checklist adjust → 'Chk A' completed", JSON.stringify(chkA));
+      ok(!!chkB2, "PssUpdateV2 checklist adjust → 'Chk B' renamed to 'Chk B2'", JSON.stringify(chkB2));
+
+      // REMOVE requires confirmed:true — the gate must reject without it.
+      const rmBlocked = await mcpCall(url, "update_tasks", {
+        operationSetId: (await call(url, "start_change_session", { projectId }, bearer)).operationSetId,
+        projectId, tasks: [{ taskId: t1, checklist: [{ match: "Chk A", remove: true }] }],
+      }, bearer);
+      ok(rmBlocked.isError === true, "checklist remove without confirmed → rejected", JSON.stringify(rmBlocked.content).slice(0, 70));
+
+      s = await call(url, "start_change_session", { projectId, description: "checklist remove" }, bearer);
+      await call(url, "update_tasks", {
+        operationSetId: s.operationSetId, projectId, confirmed: true,
+        tasks: [{ taskId: t1, checklist: [{ match: "Chk A", remove: true }] }],
+      }, bearer);
+      await call(url, "apply_changes", { operationSetId: s.operationSetId }, bearer);
+      items = await verifyChecklist(t1, bearer);
+      ok(items.length === 1 && items[0].title === "Chk B2", "checklist remove (confirmed) → only 'Chk B2' remains", `n=${items.length}`);
     }
 
     // dependency cascade-delete: delete T2 (successor) WITHOUT passing the dep id.

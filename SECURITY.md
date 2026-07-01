@@ -45,7 +45,7 @@ next step, not a deferred one.
 | 2.7 | Tool input validation | ✅ Done | Zod schemas per tool + hand-written guardrails (allow-lists, GUID checks, 200-entity cap, bind-alias traps). |
 | 2.8 | Least privilege | ✅ Done | Server holds no credentials; every call runs as the end user's delegated token. Tool scope is structural Planner writes only; reads/text edits are out of scope (routed to the generic Dataverse tool). |
 | 2.9 | Tool annotations (read-only/destructive hints) | ✅ Done | `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint` per tool ([`src/tools/index.ts`](src/tools/index.ts)). Advisory only — not relied on for enforcement. |
-| 2.10 | Human-in-the-loop for destructive ops | ✅ Done | `delete_tasks_batch` requires `confirmed=true`; whole-plan delete hard-blocked. Conversation-level approval lives in the host's orchestration skill (e.g. [`skills/guided-assistant.md`](skills/guided-assistant.md)). |
+| 2.10 | Human-in-the-loop for destructive ops | ✅ Done | `delete_tasks_batch` requires `confirmed=true`; whole-plan delete hard-blocked. `assign_task` unassign and `update_tasks` checklist removals (`remove:true`) require the same `confirmed=true` gate. Conversation-level approval lives in the host's orchestration skill (e.g. [`skills/guided-assistant.md`](skills/guided-assistant.md)). |
 
 ---
 

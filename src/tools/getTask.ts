@@ -14,6 +14,10 @@ import {
   deserializeCustomFields,
   isCustomColumnMissingError,
 } from "./customColumnsRead.js";
+import {
+  CHECKLIST_ENTITY_SET,
+  CHECKLIST_TASK_LOOKUP_VALUE,
+} from "./checklist.js";
 import type { ToolDef } from "./types.js";
 
 // One task in full, including its dependency links and resource assignments.
@@ -24,7 +28,7 @@ export const getTask: ToolDef = {
   name: "get_task",
   title: "Get Task",
   description:
-    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, isSummary flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links and resource assignments (with member name). Dependency and assignment data may be omitted (with a warning) on environments where those columns differ - the core task fields always return. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as task.customFields - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
+    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, isSummary flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links, resource assignments (with member name), and checklist items (id + title + completed - use these ids to adjust/remove items via update_tasks). Dependency, assignment and checklist data may be omitted (with a warning) on environments where those columns differ - the core task fields always return. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as task.customFields - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
   inputSchema: {
     taskId: z.string().describe("GUID of the task (msdyn_projecttaskid)."),
     includeCustomColumns: includeCustomColumnsSchema,
@@ -257,6 +261,42 @@ export const getTask: ToolDef = {
       warnings.push("Assignment read failed: " + (e instanceof Error ? e.message : String(e)));
     }
 
+    // Checklist items — child rows (degrade on 400 like dependencies/assignments).
+    // Their ids/titles let update_tasks adjust or remove specific items later.
+    let checklist: { id: string; title: string; completed: boolean }[] = [];
+    try {
+      const chkRes = await dvReq(
+        {
+          url:
+            BASE +
+            "/" +
+            CHECKLIST_ENTITY_SET +
+            "?$select=msdyn_projectchecklistid,msdyn_name,msdyn_projectchecklistcompleted" +
+            "&$filter=" +
+            CHECKLIST_TASK_LOOKUP_VALUE +
+            " eq " +
+            taskId +
+            "&$top=200",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (chkRes.status >= 400) {
+        warnings.push("Checklist items unavailable on this environment.");
+      } else {
+        checklist = (chkRes.json?.value || []).map((c: any) => ({
+          id: c.msdyn_projectchecklistid,
+          title: c.msdyn_name ?? "",
+          completed: c.msdyn_projectchecklistcompleted === true,
+        }));
+      }
+    } catch (e) {
+      warnings.push(
+        "Checklist read failed: " + (e instanceof Error ? e.message : String(e)),
+      );
+    }
+
     return {
       ok: true,
       task: {
@@ -289,6 +329,7 @@ export const getTask: ToolDef = {
       predecessors,
       successors,
       assignments,
+      checklist,
       warnings,
     };
   },

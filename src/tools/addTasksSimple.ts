@@ -13,6 +13,7 @@ import { validateAddEntities } from "./addTasks.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
 import { getEntityMetadata } from "../dataverse/metadata.js";
 import { toWrite as columnToWrite, type ColumnMeta } from "../dataverse/columnTypes.js";
+import { checklistCreateEntity } from "./checklist.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
@@ -372,13 +373,9 @@ export function buildTaskEntities(
         throw new Error("Task '" + t.ref + "': checklist item title must not be empty.");
       const chkId = randomUUID();
       checklistIds.push(chkId);
-      checklistEntities.push({
-        "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projectchecklist",
-        msdyn_projectchecklistid: chkId,
-        "msdyn_ProjectTaskId@odata.bind": "/msdyn_projecttasks(" + id + ")",
-        msdyn_name: title,
-        msdyn_projectchecklistcompleted: item.completed === true,
-      });
+      checklistEntities.push(
+        checklistCreateEntity(id, chkId, title, item.completed === true),
+      );
     }
 
     // Labels — junction rows (msdyn_projecttasktolabel) linking the task to an

@@ -88,7 +88,7 @@ means the server is not dangerous even when used from a host with no skill loade
 | `start_change_session` | Open a change session; returns `operationSetId` |
 | `add_tasks` | Add tasks (+ checklist, sprint, labels, assignees, optional `customFields`) — ergonomic, **preferred** |
 | `add_tasks_batch` | Add tasks — raw OData, advanced escape hatch |
-| `update_tasks` | Update tasks (optional `customFields`) — ergonomic, **preferred** |
+| `update_tasks` | Update tasks (+ checklist add/adjust/remove, optional `customFields`) — ergonomic, **preferred** |
 | `update_tasks_batch` | Update tasks — raw OData, advanced escape hatch |
 | `delete_tasks_batch` | Delete tasks, dependencies, buckets, or assignments |
 | `apply_changes` | Commit a change session |
@@ -154,10 +154,14 @@ in `src/tools/addTasksSimple.ts`; the built collection is re-checked by the same
 The same approach is applied wherever the model was writing raw OData:
 
 - **`update_tasks`** — `[{ taskId, subject?, start?, finish?, effortHours?,
-  progressPercent?, milestone?, priority?, description? }]`. The server emits only
-  the changed fields and converts `progressPercent` (0-100) to `msdyn_progress`
-  (0-1). Summary-task protection still runs via `validateUpdateEntities`
-  (pass `summaryTaskIds`). `update_tasks_batch` remains for raw field control.
+  progressPercent?, milestone?, priority?, description?, bucket?, sprint?, parent?,
+  checklist? }]`. The server emits only the changed fields and converts
+  `progressPercent` (0-100) to `msdyn_progress` (0-1). Summary-task protection
+  still runs via `validateUpdateEntities` (pass `summaryTaskIds`). `checklist`
+  adds (string / `{title, completed}`), adjusts (`{id|match, title?, completed?}`)
+  or removes (`{id|match, remove:true}`) items on the task — removals require the
+  top-level `confirmed:true`; discover current item ids via `get_task`.
+  `update_tasks_batch` remains for raw field control.
 - **`delete_tasks_batch`** now also accepts a `taskIds` array (expanded to
   `msdyn_projecttask` deletes) for the common case; `records` stays for
   dependencies/buckets/assignments. The `confirmed` gate is unchanged.
@@ -420,7 +424,10 @@ Known gaps and planned improvements. Contributions welcome.
 
 - ~~**Resource assignments.**~~ *Done.* `add_tasks` accepts `assignees` (project-team member name or teamMemberId, resolved against `msdyn_projectteam`) and creates `msdyn_resourceassignment` rows. The new `assign_task` tool assigns or unassigns members on an existing task without re-creating it. `start`/`finish` are blocked on create (PSS derives them from the task).
 
-- **Checklists** are supported via `add_tasks` `checklist`. **Labels**: `add_tasks` `labels` *assigns* existing plan labels, but label **creation** is UI-only — `msdyn_projectlabel` rejects both direct OData create ("edit through the Project UI") and PSS create. Unknown labels are skipped with a warning.
+- **Checklists** are supported via `add_tasks` `checklist` (create-time) and
+  `update_tasks` `checklist` (add / adjust / remove on existing tasks; removals
+  require `confirmed:true`); `get_task` returns each task's items with their ids +
+  completed state. **Labels**: `add_tasks` `labels` *assigns* existing plan labels, but label **creation** is UI-only — `msdyn_projectlabel` rejects both direct OData create ("edit through the Project UI") and PSS create. Unknown labels are skipped with a warning.
 
 - **Milestone flag.** `msdyn_ismilestone` is engine-managed and rejected by PSS on both create and update (`ScheduleAPI-AV-0002`). No API path is currently known. Investigate whether a different Dataverse action exposes it; otherwise this remains UI-only.
 

@@ -1,10 +1,32 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getApiBase, getCustomColumnsMode } from "../config.js";
-import { dvReq, dvHeaders, dvErrorMessage, asArray, assertGuid } from "../dataverse.js";
+import {
+  dvReq,
+  dvHeaders,
+  dvErrorMessage,
+  asArray,
+  assertGuid,
+  throwIfPssCreateError,
+} from "../dataverse.js";
 import { validateUpdateEntities } from "./updateTasks.js";
+import { validateAddEntities } from "./addTasks.js";
+import { validateDeleteRecords, buildDeleteEntities } from "./deleteTasks.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
 import { getEntityMetadata } from "../dataverse/metadata.js";
 import { spliceCustomFields, type ResolveCustomColumn } from "./addTasksSimple.js";
+import {
+  checklistCreateEntity,
+  checklistUpdateEntity,
+  planChecklistOps,
+  isExistingItemOp,
+  hasRemoval,
+  CHECKLIST_ENTITY_SET,
+  CHECKLIST_LOGICAL_NAME,
+  CHECKLIST_TASK_LOOKUP_VALUE,
+  type ChecklistOpInput,
+  type ExistingChecklistItem,
+} from "./checklist.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
@@ -34,6 +56,11 @@ export interface SimpleTaskUpdate {
    * CUSTOM_COLUMNS_MODE!=off on the server. See addTasksSimple.ts's SimpleTask
    * for the exact resolution/codec behaviour (shared via spliceCustomFields). */
   customFields?: Record<string, unknown>;
+  /** Checklist add / adjust / remove ops for this existing task. Add = string or
+   * {title, completed}; adjust = {id|match, title?, completed?}; remove =
+   * {id|match, remove:true}. Resolved + built by the checklist pipeline in the
+   * handler; NOT emitted into the task-update entity. See docs/plans/50. */
+  checklist?: ChecklistOpInput[];
 }
 
 export interface BuiltUpdate {
@@ -65,7 +92,8 @@ export function buildUpdateEntities(
     throw new Error("tasks must be a non-empty array.");
 
   const warnings: string[] = [];
-  const entities = tasks.map((t, i) => {
+  const entities: any[] = [];
+  tasks.forEach((t, i) => {
     const id = (t.taskId || "").trim();
     if (!id) throw new Error("tasks[" + i + "]: taskId is required.");
     if (!GUID_RE.test(id))
@@ -199,7 +227,11 @@ export function buildUpdateEntities(
       }
     }
     if (t.customFields && Object.keys(t.customFields).length > 0) changed++;
-    if (changed === 0)
+    const hasChecklistOps = Array.isArray(t.checklist) && t.checklist.length > 0;
+    if (changed === 0) {
+      // A checklist-only change is valid: it produces NO task-update entity here
+      // (the handler's checklist pipeline applies it via separate PSS calls).
+      if (hasChecklistOps) return;
       throw new Error(
         "tasks[" +
           i +
@@ -209,6 +241,7 @@ export function buildUpdateEntities(
             : "") +
           ".",
       );
+    }
 
     // Custom (non-msdyn_) columns — resolved via metadata + the columnTypes.ts
     // codec, spliced in as extra keys on the same task entity. Fails closed
@@ -216,11 +249,25 @@ export function buildUpdateEntities(
     // unresolved column, or a bad value.
     spliceCustomFields(ent, t.customFields, "update", resolveCustomColumn, "tasks[" + i + "]");
 
-    return ent;
+    entities.push(ent);
   });
 
   return { entities, warnings };
 }
+
+// One checklist op: a string (add-by-title) or an object. See classification in
+// checklist.ts / docs/plans/50 — add = no id/match/remove; adjust = id|match (+
+// title/completed); remove = {id|match, remove:true}.
+const checklistOpSchema = z.union([
+  z.string(),
+  z.object({
+    id: z.string().optional().describe("Target an existing item by its msdyn_projectchecklistid (from get_task). Takes precedence over match."),
+    match: z.string().optional().describe("Target an existing item by its CURRENT title."),
+    title: z.string().optional().describe("ADD: the item title. ADJUST: the NEW title (rename)."),
+    completed: z.boolean().optional().describe("ADD/ADJUST: completion state (ticked)."),
+    remove: z.boolean().optional().describe("REMOVE this existing item (needs id or match). Requires the top-level confirmed:true."),
+  }),
+]);
 
 const updateSchema = z.object({
   taskId: z.string().describe("GUID of the task to update (msdyn_projecttaskid)."),
@@ -264,6 +311,12 @@ const updateSchema = z.object({
     .describe(
       "Custom (non-msdyn_) Dataverse column values, keyed by logical name, e.g. {\"new_riskscore\": 9}. Requires CUSTOM_COLUMNS_MODE!=off on the server. Picklist accepts a label or an integer value; lookups accept a bare GUID (when the column has a single target) or {target,id}. Use list_custom_columns / describe_columns to discover valid names and types first. Standard msdyn_ fields are rejected here — use this tool's named parameters for those.",
     ),
+  checklist: z
+    .array(checklistOpSchema)
+    .optional()
+    .describe(
+      "Checklist add / adjust / remove ops for this task. ADD: a string title, or {title, completed}. ADJUST an existing item: {id | match, title?, completed?} (match = the item's current title; title = the new title to rename). REMOVE an existing item: {id | match, remove:true} — requires the top-level confirmed:true. Discover current items and their ids with get_task. A task may carry checklist ops alone or alongside other field changes.",
+    ),
 });
 
 // Ergonomic update - the model sends a plain list keyed by taskId; the server
@@ -272,7 +325,7 @@ export const updateTasksSimple: ToolDef = {
   name: "update_tasks",
   title: "Update Tasks in Plan",
   description:
-    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket, sprint, parent); the server builds the Dataverse payload. Move a task to another bucket with 'bucket', place a task in a sprint with 'sprint' (sprint name resolved against the plan — requires projectId, or pass a sprintId GUID directly), or reparent it under another existing task with 'parent' (an existing task GUID). Pass projectId to enable three automatic behaviours: (1) bucket names are resolved to IDs, (2) sprint names are resolved to IDs, and (3) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Un-parenting (moving a task to the top level) is not supported and is ignored with a warning. Removing a task from a sprint (sprint=null) is not supported. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
+    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket, sprint, parent); the server builds the Dataverse payload. Move a task to another bucket with 'bucket', place a task in a sprint with 'sprint' (sprint name resolved against the plan — requires projectId, or pass a sprintId GUID directly), or reparent it under another existing task with 'parent' (an existing task GUID). Pass projectId to enable three automatic behaviours: (1) bucket names are resolved to IDs, (2) sprint names are resolved to IDs, and (3) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Un-parenting (moving a task to the top level) is not supported and is ignored with a warning. Removing a task from a sprint (sprint=null) is not supported. Each task may also carry checklist ops (checklist): add items (string title or {title, completed}), adjust an existing item ({id|match, title?, completed?}), or remove one ({id|match, remove:true}); removals require confirmed:true. A task may carry checklist ops alone. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
   inputSchema: {
     operationSetId: z
       .string()
@@ -280,6 +333,12 @@ export const updateTasksSimple: ToolDef = {
     tasks: z
       .union([z.string(), z.array(updateSchema)])
       .describe("The task updates. A JSON array (or JSON string) of update objects."),
+    confirmed: z
+      .boolean()
+      .optional()
+      .describe(
+        "Required true ONLY when any checklist entry has remove:true — removing a checklist item deletes it on apply. Obtain explicit user confirmation first. Ignored when there are no removals.",
+      ),
     projectId: z
       .string()
       .optional()
@@ -298,6 +357,7 @@ export const updateTasksSimple: ToolDef = {
     projectId?: unknown;
     tasks: unknown;
     summaryTaskIds?: unknown;
+    confirmed?: unknown;
   }) => {
     const BASE = getApiBase();
 
@@ -433,7 +493,7 @@ export const updateTasksSimple: ToolDef = {
     // This lets the guard fire without requiring a prior get_plan_tasks_and_buckets
     // call — the same projectId used for bucket resolution doubles here.
     let effectiveSummaryIds: unknown = input.summaryTaskIds;
-    if (input.projectId) {
+    if (input.projectId && entities.length > 0) {
       const projId = assertGuid(String(input.projectId), "projectId");
       const hierRes = await dvReq(
         {
@@ -462,28 +522,166 @@ export const updateTasksSimple: ToolDef = {
       // If the hierarchy fetch fails, fall back to whatever the caller provided.
     }
 
-    // Defense in depth + summary-task protection (same checks as the raw tool).
-    validateUpdateEntities(entities, effectiveSummaryIds);
+    // ---- Checklist pipeline (add / adjust / remove items on existing tasks) ----
+    // taskIds were already GUID-validated by buildUpdateEntities above (it throws
+    // on the first invalid one), so every checklist task here has a valid GUID.
+    const checklistTasks = tasks
+      .filter((t) => Array.isArray(t.checklist) && t.checklist!.length > 0)
+      .map((t) => ({ taskId: (t.taskId || "").trim(), ops: t.checklist! }));
 
-    const response = await dvReq({
-      url: BASE + "/msdyn_PssUpdateV2",
-      method: "POST",
-      headers: dvHeaders({ json: true }),
-      body: { EntityCollection: entities, OperationSetId: operationSetId },
-    });
+    // Removals delete user data — gate them behind confirmed:true (the repo's
+    // delete-confirm golden rule), but only when a removal is actually present.
+    const anyRemoval = checklistTasks.some((ct) => hasRemoval(ct.ops));
+    if (
+      anyRemoval &&
+      input.confirmed !== true &&
+      (input.confirmed as unknown) !== "true"
+    )
+      throw new Error(
+        "Refused: a checklist entry has remove:true, which deletes the item on apply. Set confirmed:true after an explicit user confirmation.",
+      );
 
-    const body = response.json || {};
-    if (response.status >= 400) {
-      const msg = dvErrorMessage(response);
-      if (response.status === 403)
-        throw new Error("403 - missing license or privileges: " + msg);
-      throw new Error("pss_update_batch failed (" + response.status + "): " + msg);
+    // Read current items for any task with an adjust/remove op (adds need no read).
+    // Fails closed: a failed read rejects the batch rather than guessing.
+    const existingByTask = new Map<string, ExistingChecklistItem[]>();
+    for (const ct of checklistTasks) {
+      if (!ct.ops.some(isExistingItemOp)) continue;
+      const tid = assertGuid(ct.taskId, "taskId");
+      const res = await dvReq(
+        {
+          url:
+            BASE +
+            "/" +
+            CHECKLIST_ENTITY_SET +
+            "?$select=msdyn_projectchecklistid,msdyn_name,msdyn_projectchecklistcompleted" +
+            "&$filter=" +
+            CHECKLIST_TASK_LOOKUP_VALUE +
+            " eq " +
+            tid +
+            "&$top=200",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (res.status >= 400)
+        throw new Error(
+          "Could not read the current checklist for task " +
+            tid +
+            " (" +
+            res.status +
+            "): " +
+            dvErrorMessage(res) +
+            ". adjust/remove need the existing items to resolve by id/title.",
+        );
+      existingByTask.set(
+        tid.toLowerCase(),
+        (res.json?.value || []).map((c: any) => ({
+          id: c.msdyn_projectchecklistid,
+          title: String(c.msdyn_name ?? ""),
+          completed: c.msdyn_projectchecklistcompleted === true,
+        })),
+      );
     }
+
+    const planned = planChecklistOps(checklistTasks, existingByTask, randomUUID);
+    const checklistCreateEntities = planned.creates.map((c) =>
+      checklistCreateEntity(c.taskId, c.checklistId, c.title, c.completed),
+    );
+    const checklistUpdateEntities = planned.updates.map((u) =>
+      checklistUpdateEntity(u.id, { title: u.title, completed: u.completed }),
+    );
+    const checklistDeleteRecords = planned.removes.map((r) => ({
+      entityLogicalName: CHECKLIST_LOGICAL_NAME,
+      recordId: r.id,
+    }));
+
+    // Combined UPDATE collection: task-field edits + checklist item edits, one call.
+    const updateEntities = [...entities, ...checklistUpdateEntities];
+
+    // Defense in depth — reuse the raw tools' validators (no guardrail weakened):
+    // summary-task protection + 200-cap on the update collection, allow-list +
+    // unique-GUID + 200-cap on the checklist creates, and the delete guardrail on
+    // the checklist removes.
+    if (updateEntities.length > 0)
+      validateUpdateEntities(updateEntities, effectiveSummaryIds);
+    if (checklistCreateEntities.length > 0)
+      validateAddEntities(checklistCreateEntities);
+    if (checklistDeleteRecords.length > 0)
+      validateDeleteRecords(checklistDeleteRecords);
+
+    // Fire each PSS call only when it has work, all against the SAME OperationSet
+    // (applied together on apply_changes). This mirrors calling update_tasks +
+    // add_tasks_batch + delete_tasks_batch in one session.
+    const responses: Record<string, unknown> = {};
+    if (updateEntities.length > 0) {
+      const response = await dvReq({
+        url: BASE + "/msdyn_PssUpdateV2",
+        method: "POST",
+        headers: dvHeaders({ json: true }),
+        body: { EntityCollection: updateEntities, OperationSetId: operationSetId },
+      });
+      if (response.status >= 400) {
+        const msg = dvErrorMessage(response);
+        if (response.status === 403)
+          throw new Error("403 - missing license or privileges: " + msg);
+        throw new Error("pss_update_batch failed (" + response.status + "): " + msg);
+      }
+      responses.update = response.json || {};
+    }
+    if (checklistCreateEntities.length > 0) {
+      const response = await dvReq({
+        url: BASE + "/msdyn_PssCreateV2",
+        method: "POST",
+        headers: dvHeaders({ json: true }),
+        body: {
+          EntityCollection: checklistCreateEntities,
+          OperationSetId: operationSetId,
+        },
+      });
+      throwIfPssCreateError(response);
+      responses.create = response.json || {};
+    }
+    if (checklistDeleteRecords.length > 0) {
+      const response = await dvReq({
+        url: BASE + "/msdyn_PssDeleteV2",
+        method: "POST",
+        headers: dvHeaders({ json: true }),
+        body: {
+          EntityCollection: buildDeleteEntities(checklistDeleteRecords),
+          OperationSetId: operationSetId,
+        },
+      });
+      if (response.status >= 400) {
+        const msg = dvErrorMessage(response);
+        if (response.status === 403)
+          throw new Error("403 - missing license or privileges: " + msg);
+        throw new Error("pss_delete_batch failed (" + response.status + "): " + msg);
+      }
+      responses.delete = response.json || {};
+    }
+
     return {
       ok: true,
-      queued: entities.length,
-      warnings,
-      response: body,
+      queued:
+        updateEntities.length +
+        checklistCreateEntities.length +
+        checklistDeleteRecords.length,
+      taskUpdates: entities.length,
+      checklist:
+        checklistTasks.length > 0
+          ? {
+              added: planned.creates.length,
+              updated: planned.updates.length,
+              removed: planned.removes.length,
+            }
+          : undefined,
+      checklistIds:
+        planned.creates.length > 0
+          ? planned.creates.map((c) => c.checklistId)
+          : undefined,
+      warnings: [...warnings, ...planned.warnings],
+      response: responses,
       note: "Queued. Saved only after 'Apply Changes to Plan'.",
     };
   },
