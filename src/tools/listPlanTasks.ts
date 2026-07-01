@@ -24,6 +24,11 @@ import {
   isMissingPropertyError,
   EXTENDED_TASK_FIELDS,
 } from "./capabilities.js";
+import {
+  includeCustomColumnsSchema,
+  resolveCustomColumnsForRead,
+  deserializeCustomFields,
+} from "./customColumnsRead.js";
 import type { ToolDef } from "./types.js";
 
 interface FullTask extends RawTask {
@@ -53,7 +58,7 @@ export const listPlanTasks: ToolDef = {
   description:
     "Lists a plan's tasks WITH descriptions, filtered by 'all', 'overdue' or 'milestones', optionally scoped to one bucket. 'overdue' = leaf tasks past their finish date and under 100% (summary/parent tasks are excluded - their dates roll up from children). Size-capped: returns at most " +
     SAFE_PAGE_SIZE +
-    " tasks per page AND shrinks the page further when notes are large, so each response stays under hosts' ~200k-char limit and is NEVER silently truncated; sets hasMore:true + a `nextPageToken` when more match — KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). A very long description is clipped to a preview with descriptionTruncated:true — fetch the full text via get_task. For lean bulk paging of every task (no descriptions) prefer get_plan_tasks_and_buckets. To find only the tasks whose title or notes CONTAIN a given word, name or phrase, use search_plan_tasks instead of paging this list and grepping. If truncated=true the underlying scan hit the 10,000-row cap and the list is incomplete.",
+    " tasks per page AND shrinks the page further when notes are large, so each response stays under hosts' ~200k-char limit and is NEVER silently truncated; sets hasMore:true + a `nextPageToken` when more match — KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). A very long description is clipped to a preview with descriptionTruncated:true — fetch the full text via get_task. For lean bulk paging of every task (no descriptions) prefer get_plan_tasks_and_buckets. To find only the tasks whose title or notes CONTAIN a given word, name or phrase, use search_plan_tasks instead of paging this list and grepping. If truncated=true the underlying scan hit the 10,000-row cap and the list is incomplete. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as customFields per task - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     filter: z
@@ -77,6 +82,7 @@ export const listPlanTasks: ToolDef = {
       .string()
       .optional()
       .describe("Opaque cursor from a previous call's nextPageToken; omit for the first page."),
+    includeCustomColumns: includeCustomColumnsSchema,
   },
   handler: async (input: {
     projectId: string;
@@ -84,6 +90,7 @@ export const listPlanTasks: ToolDef = {
     bucketId?: string;
     limit?: number;
     pageToken?: string;
+    includeCustomColumns?: boolean | string[];
   }) => {
     const BASE = getApiBase();
     const projectId = assertGuid(input.projectId, "projectId");
@@ -104,6 +111,49 @@ export const listPlanTasks: ToolDef = {
       "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
     const filterAndOrder = "&$filter=" + odata + "&$orderby=msdyn_displaysequence asc";
 
+    // Custom-column selection (additive; no-op unless CUSTOM_COLUMNS_MODE!=off
+    // AND includeCustomColumns was passed).
+    let customSelection = await resolveCustomColumnsForRead(
+      "msdyn_projecttask",
+      input.includeCustomColumns,
+    );
+    toolWarnings.push(...customSelection.warnings);
+    let customSelectSuffix = customSelection.selectTokens.length
+      ? "," + customSelection.selectTokens.join(",")
+      : "";
+    let listHeaders = customSelection.needsWidenedPrefer
+      ? readHeaders({ includeCustomColumns: true })
+      : readHeaders();
+
+    // A custom column that was renamed/removed since discovery degrades the
+    // WHOLE list to core-only (same missing-property probe as the extended-
+    // field capability check) rather than failing the tool. pageAll/dvReq
+    // THROW on a >=400 status, so the probe first checks a direct single-shot
+    // request before committing to the (possibly multi-page) pageAll scan.
+    if (customSelectSuffix) {
+      const probeUrl =
+        BASE +
+        "/msdyn_projecttasks?$select=" +
+        CORE_SELECT +
+        customSelectSuffix +
+        EXPAND +
+        filterAndOrder +
+        "&$top=1";
+      const probeRes = await dvReq({ url: probeUrl, method: "GET", headers: listHeaders }, { retry: true });
+      if (isMissingPropertyError(probeRes.status, dvErrorMessage(probeRes))) {
+        toolWarnings.push(
+          "One or more requested custom columns are no longer present on this entity — falling back to core fields only.",
+        );
+        customSelection = { ...customSelection, columns: new Map() };
+        customSelectSuffix = "";
+        listHeaders = readHeaders();
+      } else if (probeRes.status >= 400) {
+        throw new Error(
+          "list_plan_tasks failed (" + probeRes.status + "): " + dvErrorMessage(probeRes),
+        );
+      }
+    }
+
     // Check the process-lifetime capability cache for extended fields.
     const cap = getExtendedTaskFieldsCapability();
     let hasExtended = cap !== "absent";
@@ -112,8 +162,13 @@ export const listPlanTasks: ToolDef = {
     if (cap === "absent") {
       // Known absent — go straight to core select.
       paged = await pageAll(
-        BASE + "/msdyn_projecttasks?$select=" + CORE_SELECT + EXPAND + filterAndOrder,
-        readHeaders(),
+        BASE +
+          "/msdyn_projecttasks?$select=" +
+          CORE_SELECT +
+          customSelectSuffix +
+          EXPAND +
+          filterAndOrder,
+        listHeaders,
       );
     } else if (cap === "present") {
       // Known present — use extended select.
@@ -123,9 +178,10 @@ export const listPlanTasks: ToolDef = {
           CORE_SELECT +
           "," +
           EXTENDED_TASK_FIELDS +
+          customSelectSuffix +
           EXPAND +
           filterAndOrder,
-        readHeaders(),
+        listHeaders,
       );
     } else {
       // Unknown — probe with a single first-page request including extended fields.
@@ -135,9 +191,10 @@ export const listPlanTasks: ToolDef = {
         CORE_SELECT +
         "," +
         EXTENDED_TASK_FIELDS +
+        customSelectSuffix +
         EXPAND +
         filterAndOrder;
-      const probeRes = await dvReq({ url: extUrl, method: "GET", headers: readHeaders() }, { retry: true });
+      const probeRes = await dvReq({ url: extUrl, method: "GET", headers: listHeaders }, { retry: true });
 
       if (isMissingPropertyError(probeRes.status, dvErrorMessage(probeRes))) {
         // Extended fields absent on this tenant — cache and retry with core only.
@@ -147,8 +204,13 @@ export const listPlanTasks: ToolDef = {
           "Extended scheduling fields (remaining effort, duration, actuals) are not available on this environment.",
         );
         paged = await pageAll(
-          BASE + "/msdyn_projecttasks?$select=" + CORE_SELECT + EXPAND + filterAndOrder,
-          readHeaders(),
+          BASE +
+            "/msdyn_projecttasks?$select=" +
+            CORE_SELECT +
+            customSelectSuffix +
+            EXPAND +
+            filterAndOrder,
+          listHeaders,
         );
       } else if (probeRes.status >= 400) {
         throw new Error(
@@ -158,7 +220,7 @@ export const listPlanTasks: ToolDef = {
         // Extended fields available — record and collect all pages.
         setExtendedTaskFieldsCapability("present");
         hasExtended = true;
-        paged = await pageAll(extUrl, readHeaders());
+        paged = await pageAll(extUrl, listHeaders);
       }
     }
 
@@ -218,6 +280,9 @@ export const listPlanTasks: ToolDef = {
         durationHours: t.msdyn_duration ?? null,
         actualStart: t.msdyn_actualstart ?? null,
         actualFinish: t.msdyn_actualfinish ?? null,
+      }),
+      ...(customSelection.columns.size && {
+        customFields: deserializeCustomFields(customSelection, t as unknown as Record<string, unknown>),
       }),
       };
     });

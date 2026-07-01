@@ -163,12 +163,31 @@ export async function pageAll(
   return { rows, pages, truncated };
 }
 
-/** Read-only Dataverse headers with large page size + formatted-value annotations. */
-export function readHeaders(): Record<string, string> {
+/**
+ * Annotation set requested via the `Prefer: odata.include-annotations=` header.
+ * FormattedValue alone (the long-standing default) does NOT surface
+ * `@Microsoft.Dynamics.CRM.lookuplogicalname` — proven live against a real
+ * tenant by the schema-scout probe. Widen to WITH_LOOKUP_LOGICAL_NAME only on
+ * the custom-column read path (includeCustomColumns), which needs the target
+ * entity logical name for polymorphic lookups; degrade gracefully if the
+ * annotation is still absent (fromRead() treats it as optional).
+ */
+const FORMATTED_VALUE_ANNOTATION = "OData.Community.Display.V1.FormattedValue";
+const LOOKUP_LOGICAL_NAME_ANNOTATION = "Microsoft.Dynamics.CRM.lookuplogicalname";
+
+/**
+ * Read-only Dataverse headers with large page size + formatted-value
+ * annotations. Pass `includeCustomColumns: true` to also request
+ * `lookuplogicalname` (needed to surface a custom lookup's target entity) —
+ * default false preserves today's exact header for every existing caller.
+ */
+export function readHeaders(opts?: { includeCustomColumns?: boolean }): Record<string, string> {
+  const annotations = opts?.includeCustomColumns
+    ? `${FORMATTED_VALUE_ANNOTATION},${LOOKUP_LOGICAL_NAME_ANNOTATION}`
+    : FORMATTED_VALUE_ANNOTATION;
   return dvHeaders({
     extra: {
-      Prefer:
-        'odata.maxpagesize=1000,odata.include-annotations="OData.Community.Display.V1.FormattedValue"',
+      Prefer: `odata.maxpagesize=1000,odata.include-annotations="${annotations}"`,
     },
   });
 }

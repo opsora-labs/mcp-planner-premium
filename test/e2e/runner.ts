@@ -23,6 +23,7 @@ import { runPreflight } from "./scenarios/preflight.js";
 import { runReadSweep } from "./scenarios/readSweep.js";
 import { runLifecycle } from "./scenarios/lifecycle.js";
 import { runGuardrails } from "./scenarios/guardrails.js";
+import { runCustomColumns } from "./scenarios/customColumns.js";
 import { runAgentic } from "./agentic.js";
 import { renderReport } from "./report.js";
 import type { RunSummary } from "./report.js";
@@ -125,6 +126,23 @@ async function main(): Promise<void> {
       console.log(`  ✅  ${gFired}/${g.length} guardrails fired correctly`);
     } catch (e) {
       console.warn("  ⚠️  Guardrail phase error:", (e as Error).message);
+    }
+
+    // ── Phase 5: Custom Dataverse columns (gated, SKIPPED by default) ──
+    // No target tenant used for e2e/CI has real custom columns, so every step
+    // here reports status "skip" with a documented reason unless the operator
+    // has seeded a column and set E2E_CUSTOM_COLUMN_TASK_STRING (see
+    // scenarios/customColumns.ts header). Never requires or assumes a live
+    // custom column; safe to run unconditionally.
+    console.log("Phase 5: Custom Dataverse columns (gated)...");
+    try {
+      const target =
+        manifest && manifest.projectId && manifest.createdTaskIds.length > 0
+          ? { projectId: manifest.projectId, taskId: manifest.createdTaskIds[0] }
+          : undefined;
+      await runCustomColumns(ctx, target);
+    } catch (e) {
+      console.warn("  ⚠️  Custom-columns phase error:", (e as Error).message);
     }
 
     // ── Phase 4: Agentic (optional) ───────────────────────────────────

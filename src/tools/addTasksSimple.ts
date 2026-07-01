@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getApiBase, getEnv } from "../config.js";
+import { getApiBase, getEnv, getCustomColumnsMode } from "../config.js";
 import {
   dvReq,
   dvHeaders,
@@ -11,6 +11,8 @@ import {
 } from "../dataverse.js";
 import { validateAddEntities } from "./addTasks.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
+import { getEntityMetadata } from "../dataverse/metadata.js";
+import { toWrite as columnToWrite, type ColumnMeta } from "../dataverse/columnTypes.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
@@ -70,10 +72,65 @@ export interface SimpleTask {
    * project team) or a teamMemberId GUID. The person must already be on the
    * project team — an unknown assignee is skipped with a warning. */
   assignees?: string[];
+  /** Custom (non-msdyn_) column values, keyed by logical name. Requires
+   * CUSTOM_COLUMNS_MODE!=off on the server. Resolved via metadata + the
+   * columnTypes.ts codec — label-friendly (picklist label or value; lookup
+   * {target,id} or a bare guid when single-target). Rejects any msdyn_* key. */
+  customFields?: Record<string, unknown>;
 }
 
 /** Resolves a team-member reference to the ids a resource assignment needs. */
 export type ResolveAssignee = (assignee: string) => { teamMemberId: string; bookableResourceId: string } | null;
+
+/** Resolves a custom (non-msdyn_) column's metadata by logical name, or
+ * undefined if it doesn't exist / isn't a custom column on this entity.
+ * Injected into buildTaskEntities/buildUpdateEntities so those builders stay
+ * pure and unit-testable with a fake resolver (no network in tests) — the
+ * async handler fetches metadata via dataverse/metadata.ts and closes over it. */
+export type ResolveCustomColumn = (logicalName: string) => ColumnMeta | undefined;
+
+/**
+ * Splices customFields into `ent` via the column codec. Throws a clear,
+ * specific error (never a silent drop) when a key is msdyn_* (prefix
+ * discipline — the custom channel must never bypass the standard allow-list),
+ * or when the column can't be resolved/serialized. `contextLabel` is a short
+ * prefix identifying which task/ref the error belongs to.
+ */
+export function spliceCustomFields(
+  ent: Record<string, unknown>,
+  customFields: Record<string, unknown> | undefined,
+  mode: "create" | "update",
+  resolveCustomColumn: ResolveCustomColumn | undefined,
+  contextLabel: string,
+): void {
+  if (!customFields) return;
+  const keys = Object.keys(customFields);
+  if (keys.length === 0) return;
+  if (!resolveCustomColumn)
+    throw new Error(
+      contextLabel +
+        ": customFields were provided but custom-column resolution is unavailable (CUSTOM_COLUMNS_MODE is 'off', or the server could not be reached). Set CUSTOM_COLUMNS_MODE=metadata, or remove customFields.",
+    );
+  for (const key of keys) {
+    if (/^msdyn_/i.test(key))
+      throw new Error(
+        contextLabel +
+          ": customFields key '" +
+          key +
+          "' starts with 'msdyn_' — that is a standard field, not a custom column. Use the tool's named parameter for it instead (customFields is only for customer-added, non-msdyn_ columns).",
+      );
+    const col = resolveCustomColumn(key);
+    if (!col)
+      throw new Error(
+        contextLabel +
+          ": customFields key '" +
+          key +
+          "' is not a known custom column on this entity. Use list_custom_columns to discover valid names.",
+      );
+    const fragments = columnToWrite(col, customFields[key], mode);
+    for (const [k, v] of fragments) ent[k] = v;
+  }
+}
 
 export interface BuiltBatch {
   entities: any[];
@@ -147,6 +204,7 @@ export function buildTaskEntities(
   resolveSprintId?: (sprint: string) => string,
   resolveLabelId?: (label: string) => string,
   resolveAssignee?: ResolveAssignee,
+  resolveCustomColumn?: ResolveCustomColumn,
 ): BuiltBatch {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
@@ -254,6 +312,12 @@ export function buildTaskEntities(
           "): description contains angle-bracket content (e.g. \"<...>\") that Dataverse strips on save — that text will not be stored. Remove or rephrase the angle brackets if it must be kept.",
       );
     }
+
+    // Custom (non-msdyn_) columns — resolved via metadata + the columnTypes.ts
+    // codec, spliced in as extra keys on the same task entity. Fails closed with
+    // a specific error (never a silent drop) on an msdyn_* key, an unresolved
+    // column, or a bad value.
+    spliceCustomFields(ent, t.customFields, "create", resolveCustomColumn, "tasks[" + t.ref + "]");
 
     taskEntities.push(ent);
 
@@ -448,6 +512,12 @@ const taskSchema = z.object({
     .optional()
     .describe(
       "Assign project-team members to this task: member name (resolved against the plan's project team) or teamMemberId GUIDs (from list_team_members). The person must already be on the project team — unknown assignees are skipped with a warning.",
+    ),
+  customFields: z
+    .record(z.unknown())
+    .optional()
+    .describe(
+      "Custom (non-msdyn_) Dataverse column values, keyed by logical name, e.g. {\"new_riskscore\": 7, \"new_category\": \"High\"}. Requires CUSTOM_COLUMNS_MODE!=off on the server. Picklist accepts a label or an integer value; lookups accept a bare GUID (when the column has a single target) or {target,id}. Use list_custom_columns / describe_columns to discover valid names and types first. Standard msdyn_ fields are rejected here — use this tool's named parameters for those.",
     ),
 });
 
@@ -648,11 +718,26 @@ export const addTasksSimple: ToolDef = {
       return teamByName[a.toLowerCase()] ?? null;
     };
 
+    // Custom (non-msdyn_) columns: fetch metadata for msdyn_projecttask ONLY if
+    // any task actually uses customFields, and only when the feature is enabled
+    // (CUSTOM_COLUMNS_MODE!=off) — keeps the default path byte-for-byte
+    // unchanged and avoids an unnecessary metadata round-trip otherwise.
+    const wantsCustomFields = tasks.some((t) => t.customFields && Object.keys(t.customFields).length > 0);
+    let resolveCustomColumn: ResolveCustomColumn | undefined;
+    if (wantsCustomFields) {
+      if (getCustomColumnsMode() === "off")
+        throw new Error(
+          "customFields was provided but CUSTOM_COLUMNS_MODE is 'off' on this server. Ask the server operator to set CUSTOM_COLUMNS_MODE=metadata (or metadata+allowlist), or remove customFields.",
+        );
+      const entityMeta = await getEntityMetadata("msdyn_projecttask");
+      resolveCustomColumn = (logicalName: string) => entityMeta.columns.get(logicalName);
+    }
+
     const linkTypeValues =
       getEnv().DATAVERSE_LINK_TYPE_STYLE === "eu"
         ? LINK_TYPE_VALUES_EU
         : LINK_TYPE_VALUES_GLOBAL;
-    const built = buildTaskEntities(projectId, tasks, resolveBucketId, linkTypeValues, resolveSprintId, resolveLabelId, resolveAssignee);
+    const built = buildTaskEntities(projectId, tasks, resolveBucketId, linkTypeValues, resolveSprintId, resolveLabelId, resolveAssignee, resolveCustomColumn);
 
     // Defense in depth: the built collection must still pass the raw guardrails.
     validateAddEntities(built.entities);

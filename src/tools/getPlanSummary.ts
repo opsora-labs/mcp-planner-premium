@@ -2,6 +2,12 @@ import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
 import { pageAll, readHeaders, summariseTasks, nowIso, type RawTask } from "./readHelpers.js";
+import {
+  includeCustomColumnsSchema,
+  resolveCustomColumnsForRead,
+  deserializeCustomFields,
+  isCustomColumnMissingError,
+} from "./customColumnsRead.js";
 import type { ToolDef } from "./types.js";
 
 // Plan-level reporting rollup. Reads the plan's server-computed rollups plus a
@@ -10,14 +16,29 @@ export const getPlanSummary: ToolDef = {
   name: "get_plan_summary",
   title: "Get Plan Summary",
   description:
-    "Returns a reporting rollup for one plan: name, dates, % complete, effort (total/completed/remaining), and task counts (total, leaf, summary, milestones, overdue-leaf). Overdue counts LEAF tasks only (summary tasks roll up from children). progressPercent is 0-100. On environments without msdyn_effortremaining, effortRemainingHours is returned null with a note in warnings[]. NOTE: for verifying a write you just made, prefer an independent read path - this is for reporting/exploration. If truncated=true the task scan was incomplete.",
+    "Returns a reporting rollup for one plan: name, dates, % complete, effort (total/completed/remaining), and task counts (total, leaf, summary, milestones, overdue-leaf). Overdue counts LEAF tasks only (summary tasks roll up from children). progressPercent is 0-100. On environments without msdyn_effortremaining, effortRemainingHours is returned null with a note in warnings[]. NOTE: for verifying a write you just made, prefer an independent read path - this is for reporting/exploration. If truncated=true the task scan was incomplete. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns on the PLAN as customFields - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
+    includeCustomColumns: includeCustomColumnsSchema,
   },
-  handler: async (input: { projectId: string }) => {
+  handler: async (input: { projectId: string; includeCustomColumns?: boolean | string[] }) => {
     const BASE = getApiBase();
     const projectId = assertGuid(input.projectId, "projectId");
     const warnings: string[] = [];
+
+    // Custom-column selection (additive; no-op unless CUSTOM_COLUMNS_MODE!=off
+    // AND includeCustomColumns was passed).
+    let customSelection = await resolveCustomColumnsForRead(
+      "msdyn_project",
+      input.includeCustomColumns,
+    );
+    warnings.push(...customSelection.warnings);
+    let customSelectSuffix = customSelection.selectTokens.length
+      ? "," + customSelection.selectTokens.join(",")
+      : "";
+    let planHeaders = customSelection.needsWidenedPrefer
+      ? readHeaders({ includeCustomColumns: true })
+      : dvHeaders();
 
     // Plan rollup row. msdyn_effortremaining is environment-dependent: try it,
     // degrade to the proven field set on 400.
@@ -29,19 +50,37 @@ export const getPlanSummary: ToolDef = {
       "msdyn_effort,msdyn_effortcompleted,modifiedon";
     let planRes = await dvReq(
       {
-        url: BASE + "/msdyn_projects(" + projectId + ")?$select=" + fullSelect,
+        url: BASE + "/msdyn_projects(" + projectId + ")?$select=" + fullSelect + customSelectSuffix,
         method: "GET",
-        headers: dvHeaders(),
+        headers: planHeaders,
       },
       { retry: true },
     );
+    if (customSelectSuffix && isCustomColumnMissingError(planRes, [...customSelection.columns.keys()])) {
+      // A requested custom column was renamed/removed since discovery — degrade
+      // to core-only rather than failing the whole read.
+      warnings.push(
+        "One or more requested custom columns are no longer present on this entity — falling back to core fields only.",
+      );
+      customSelection = { ...customSelection, columns: new Map() };
+      customSelectSuffix = "";
+      planHeaders = dvHeaders();
+      planRes = await dvReq(
+        {
+          url: BASE + "/msdyn_projects(" + projectId + ")?$select=" + fullSelect,
+          method: "GET",
+          headers: planHeaders,
+        },
+        { retry: true },
+      );
+    }
     if (planRes.status >= 400) {
       warnings.push("msdyn_effortremaining not available on this environment - omitted.");
       planRes = await dvReq(
         {
-          url: BASE + "/msdyn_projects(" + projectId + ")?$select=" + baseSelect,
+          url: BASE + "/msdyn_projects(" + projectId + ")?$select=" + baseSelect + customSelectSuffix,
           method: "GET",
-          headers: dvHeaders(),
+          headers: planHeaders,
         },
         { retry: true },
       );
@@ -51,6 +90,9 @@ export const getPlanSummary: ToolDef = {
         "get_plan_summary failed (" + planRes.status + "): " + dvErrorMessage(planRes),
       );
     const p = planRes.json || {};
+    const customFields = customSelection.columns.size
+      ? deserializeCustomFields(customSelection, p)
+      : undefined;
 
     // Summary-aware task counts (one paginated scan). msdyn_outlinelevel is included
     // so we can surface the plan's current max nesting depth alongside the counts.
@@ -93,6 +135,7 @@ export const getPlanSummary: ToolDef = {
       modifiedOn: p.modifiedon,
       truncated: paged.truncated,
       warnings,
+      ...(customFields && { customFields }),
     };
   },
 };

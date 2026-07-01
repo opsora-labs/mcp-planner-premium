@@ -83,6 +83,47 @@ any failure (and `KEEP_PLAN=1`) precisely for this.
 - Therefore any "wrong bind alias" guard MUST be **entity-type-scoped** — the same
   key is valid on one entity and invalid on another. (We had to fix exactly this.)
 
+### Custom (non-`msdyn_`) column lookup nav-property resolution
+- The same casing trap above applies to **customer-added lookup columns** —
+  never guess or hand-derive the nav-property name (e.g. by upper-casing the
+  first letter). Resolve it from
+  `EntityDefinitions(LogicalName='<entity>')/ManyToOneRelationships?$select=ReferencingAttribute,ReferencingEntityNavigationPropertyName,ReferencedEntity`
+  and use `ReferencingEntityNavigationPropertyName` **verbatim** as the
+  `@odata.bind` key. It is sometimes a **compound alias**, not just a casing
+  change — e.g. a lookup with logical name `new_projectimportstagingid`
+  resolved to nav property
+  `new_projectimportstagingid_msdyn_projectimportstaging`, not
+  `new_ProjectImportStagingId`. The target **entity set** (plural, for the
+  `/set(guid)` fragment) is a *separate* lookup:
+  `EntityDefinitions(LogicalName='<target>')?$select=EntitySetName`.
+- Three corrections proven live against a real tenant while building custom-column
+  support (`src/dataverse/columnTypes.ts`, `src/dataverse/metadata.ts`) —
+  the original design doc got these wrong; obey the code, not old doc drafts:
+  1. **`IsCustomAttribute` is NOT a usable "is this a customer-added column"
+     discriminator.** On this tenant, 45/46 standard `msdyn_` fields on
+     `msdyn_projecttask` report `IsCustomAttribute:true` (60/61 on
+     `msdyn_project`) — using that flag as the gate would admit nearly the
+     entire standard schema as "custom" and defeat every downstream guardrail.
+     The real gate is **prefix discipline**: a column is custom only if its
+     logical name does **not** start with `msdyn_` (`isCustomColumnName()` in
+     `metadata.ts`). `IsCustomAttribute` is carried on `ColumnMeta` only as a
+     weak, non-load-bearing hint.
+  2. **DateOnly vs. DateTime is decided by the top-level `Format` field**
+     (`"DateOnly"` vs `"DateAndTime"`), **not** `DateTimeBehavior`.
+     `DateTimeBehavior.Value` is only ever `"UserLocal"` or
+     `"TimeZoneIndependent"` on Dataverse — it never signals date-only. Fetch
+     the `DateTimeAttributeMetadata` cast (`$select=DateTimeBehavior,Format`)
+     and branch on `Format`, not `DateTimeBehavior`.
+  3. **Lookup target logical name on read requires a widened `Prefer` header.**
+     With only `odata.include-annotations="OData.Community.Display.V1.FormattedValue"`
+     (what the standard read tools already send), the
+     `@Microsoft.Dynamics.CRM.lookuplogicalname` annotation is **not** returned
+     — so a polymorphic lookup's target entity can't be told apart from its
+     display name. Widen `Prefer` to also include
+     `Microsoft.Dynamics.CRM.lookuplogicalname` (or `*`) on any read path that
+     surfaces custom lookup columns, and degrade gracefully (fall back to a
+     bare id/FormattedValue) if the annotation is still absent.
+
 ### Fields blocked on create (set via update afterward, or not at all)
 - `msdyn_progress` — blocked on create; set with `update_tasks` after apply.
 - `msdyn_ismilestone` — rejected on create AND update (`ScheduleAPI-AV-000x`);

@@ -35,6 +35,7 @@ const SERVER_INSTRUCTIONS = [
   "Schema note: a plan's end date is msdyn_finish (not msdyn_scheduledend). Progress fields are 0-1 (0.5 = 50%); effort is in hours.",
   "Date range note: PSS clamps task dates to the plan's scheduling window, so tasks dated before the plan's start can be silently normalised. Set the plan's start early enough AT CREATION via create_plan's scheduledStart (msdyn_scheduledstart) to cover your earliest task date - the start can only be set at create time. The plan's end date (msdyn_finish) is engine-managed and CANNOT be set via the API (project-finish updates are rejected and create_plan has no finish parameter); for hard date-window changes use the Planner UI.",
   "Description note: Dataverse sanitises task descriptions. Standard special characters round-trip (the read tools decode &quot;/&amp;/&lt;/&gt; back to \" & < > to match the Planner UI), but tag-like angle-bracket content (e.g. <2 weeks>) is STRIPPED before storage and cannot be recovered — do not rely on literal <...> text surviving in a description.",
+  "Custom Dataverse columns note: customer-added (non-msdyn_) columns are OPT-IN and disabled by default (CUSTOM_COLUMNS_MODE=off on the server) — call list_custom_columns / describe_columns to discover what exists on this tenant BEFORE using customFields on add_tasks / update_tasks / create_plan or includeCustomColumns on get_task / list_plan_tasks / get_plan_summary; never guess a custom column's name or type.",
 ].join("\n");
 
 /**

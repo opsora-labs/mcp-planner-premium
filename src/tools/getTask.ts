@@ -1,13 +1,19 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
-import { linkTypeLabel, decodeDataverseText } from "./readHelpers.js";
+import { linkTypeLabel, decodeDataverseText, readHeaders } from "./readHelpers.js";
 import {
   getExtendedTaskFieldsCapability,
   setExtendedTaskFieldsCapability,
   isMissingPropertyError,
   EXTENDED_TASK_FIELDS,
 } from "./capabilities.js";
+import {
+  includeCustomColumnsSchema,
+  resolveCustomColumnsForRead,
+  deserializeCustomFields,
+  isCustomColumnMissingError,
+} from "./customColumnsRead.js";
 import type { ToolDef } from "./types.js";
 
 // One task in full, including its dependency links and resource assignments.
@@ -18,11 +24,12 @@ export const getTask: ToolDef = {
   name: "get_task",
   title: "Get Task",
   description:
-    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, isSummary flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links and resource assignments (with member name). Dependency and assignment data may be omitted (with a warning) on environments where those columns differ - the core task fields always return.",
+    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, isSummary flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links and resource assignments (with member name). Dependency and assignment data may be omitted (with a warning) on environments where those columns differ - the core task fields always return. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as task.customFields - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
   inputSchema: {
     taskId: z.string().describe("GUID of the task (msdyn_projecttaskid)."),
+    includeCustomColumns: includeCustomColumnsSchema,
   },
-  handler: async (input: { taskId: string }) => {
+  handler: async (input: { taskId: string; includeCustomColumns?: boolean | string[] }) => {
     const BASE = getApiBase();
     const taskId = assertGuid(input.taskId, "taskId");
     const warnings: string[] = [];
@@ -39,6 +46,21 @@ export const getTask: ToolDef = {
     const EXPAND =
       "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
 
+    // Custom-column selection (additive; no-op unless CUSTOM_COLUMNS_MODE!=off
+    // AND includeCustomColumns was passed). Resolved once up-front so its
+    // warnings/select tokens/header can be reused across the retry paths below.
+    const customSelection = await resolveCustomColumnsForRead(
+      "msdyn_projecttask",
+      input.includeCustomColumns,
+    );
+    warnings.push(...customSelection.warnings);
+    const customSelectSuffix = customSelection.selectTokens.length
+      ? "," + customSelection.selectTokens.join(",")
+      : "";
+    const taskHeaders = customSelection.needsWidenedPrefer
+      ? readHeaders({ includeCustomColumns: true })
+      : dvHeaders();
+
     // Check the process-lifetime capability cache first.
     // "unknown" → do the existing try-then-fallback (same behaviour as before,
     //   but the outcome is recorded so subsequent calls skip the probe).
@@ -52,9 +74,16 @@ export const getTask: ToolDef = {
       // Capability already known absent — go straight to core select.
       taskRes = await dvReq(
         {
-          url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + CORE_SELECT + EXPAND,
+          url:
+            BASE +
+            "/msdyn_projecttasks(" +
+            taskId +
+            ")?$select=" +
+            CORE_SELECT +
+            customSelectSuffix +
+            EXPAND,
           method: "GET",
-          headers: dvHeaders(),
+          headers: taskHeaders,
         },
         { retry: true },
       );
@@ -70,22 +99,37 @@ export const getTask: ToolDef = {
             CORE_SELECT +
             "," +
             EXTENDED_TASK_FIELDS +
+            customSelectSuffix +
             EXPAND,
           method: "GET",
-          headers: dvHeaders(),
+          headers: taskHeaders,
         },
         { retry: true },
       );
-      if (isMissingPropertyError(taskRes.status, dvErrorMessage(taskRes))) {
+      // Distinguish "extended field missing" from "custom column missing" —
+      // both produce the identical generic 400 shape, so the message's named
+      // property decides which branch actually applies (see
+      // isCustomColumnMissingError's doc comment for why this matters).
+      const requestedCustomNames = [...customSelection.columns.keys()];
+      const missingIsCustomColumn =
+        customSelectSuffix && isCustomColumnMissingError(taskRes, requestedCustomNames);
+      if (!missingIsCustomColumn && isMissingPropertyError(taskRes.status, dvErrorMessage(taskRes))) {
         // Extended fields absent on this tenant — record in the cache so
         // future calls (in this process) skip the probe entirely.
         setExtendedTaskFieldsCapability("absent");
         hasExtended = false;
         taskRes = await dvReq(
           {
-            url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + CORE_SELECT + EXPAND,
+            url:
+              BASE +
+              "/msdyn_projecttasks(" +
+              taskId +
+              ")?$select=" +
+              CORE_SELECT +
+              customSelectSuffix +
+              EXPAND,
             method: "GET",
-            headers: dvHeaders(),
+            headers: taskHeaders,
           },
           { retry: true },
         );
@@ -94,9 +138,31 @@ export const getTask: ToolDef = {
         setExtendedTaskFieldsCapability("present");
       }
     }
+    // A custom column that was renamed/removed since discovery degrades to
+    // core-only (reuses the same missing-property probe as the extended-field
+    // capability check) rather than failing the whole read.
+    if (customSelectSuffix && isCustomColumnMissingError(taskRes, [...customSelection.columns.keys()])) {
+      warnings.push(
+        "One or more requested custom columns are no longer present on this entity — falling back to core fields only.",
+      );
+      const coreOnlySelect =
+        CORE_SELECT + (hasExtended ? "," + EXTENDED_TASK_FIELDS : "") + EXPAND;
+      taskRes = await dvReq(
+        {
+          url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + coreOnlySelect,
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      customSelection.columns.clear();
+    }
     if (taskRes.status >= 400)
       throw new Error("get_task failed (" + taskRes.status + "): " + dvErrorMessage(taskRes));
     const t = taskRes.json || {};
+    const customFields = customSelection.columns.size
+      ? deserializeCustomFields(customSelection, t)
+      : undefined;
 
     // Dependencies in both directions (derived read-column names; degrade on 400).
     const predecessors: any[] = [];
@@ -218,6 +284,7 @@ export const getTask: ToolDef = {
         parentTaskId: t._msdyn_parenttask_value ?? null,
         parentTaskSubject: t.msdyn_parenttask?.msdyn_subject ?? null,
         sprintId: t._msdyn_projectsprint_value ?? null,
+        ...(customFields && { customFields }),
       },
       predecessors,
       successors,

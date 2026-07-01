@@ -101,6 +101,22 @@ const EnvSchema = z
     // Named tool groups to expose (comma list). Unset = all groups eligible.
     // Known groups: reporting, discovery, sessions, write, analytics.
     TOOLSETS: z.string().optional(),
+
+    // --- Custom Dataverse column support (opt-in; default off = zero behaviour change) ---
+
+    // "off" (default)            - custom-column read/discovery is disabled entirely.
+    // "metadata"                 - any non-msdyn_ column discoverable via metadata is eligible.
+    // "metadata+allowlist"       - metadata-eligible AND present in CUSTOM_COLUMNS_ALLOWLIST.
+    CUSTOM_COLUMNS_MODE: z.enum(["off", "metadata", "metadata+allowlist"]).default("off"),
+
+    // Comma list of logical names further restricting which custom columns are
+    // usable, when CUSTOM_COLUMNS_MODE=metadata+allowlist.
+    CUSTOM_COLUMNS_ALLOWLIST: z.string().optional(),
+
+    // Optional TTL for the process-lifetime metadata cache (ms). Unset = no
+    // expiry (schema is stable within a deployment, same rationale as
+    // capabilities.ts). Only useful for tenants iterating on custom-column schema.
+    CUSTOM_COLUMNS_METADATA_TTL_MS: z.coerce.number().int().positive().optional(),
   })
   .superRefine((v, ctx) => {
     if (v.AUTH_MODE === "validate" && !v.TENANT_ID) {
@@ -196,4 +212,22 @@ export function getEnabledTools(): string[] | undefined {
  */
 export function getToolsets(): string[] | undefined {
   return splitList(getEnv().TOOLSETS);
+}
+
+/** Returns the configured custom-columns mode. Default "off". */
+export function getCustomColumnsMode(): "off" | "metadata" | "metadata+allowlist" {
+  return getEnv().CUSTOM_COLUMNS_MODE;
+}
+
+/**
+ * Returns the CUSTOM_COLUMNS_ALLOWLIST (parsed comma list of logical names),
+ * or undefined when unset.
+ */
+export function getCustomColumnsAllowlist(): string[] | undefined {
+  return splitList(getEnv().CUSTOM_COLUMNS_ALLOWLIST);
+}
+
+/** Returns the configured metadata cache TTL in ms, or undefined (no expiry). */
+export function getCustomColumnsMetadataTtlMs(): number | undefined {
+  return getEnv().CUSTOM_COLUMNS_METADATA_TTL_MS;
 }

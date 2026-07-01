@@ -10,6 +10,9 @@ import {
   isReadOnlyMode,
   getEnabledTools,
   getToolsets,
+  getCustomColumnsMode,
+  getCustomColumnsAllowlist,
+  getCustomColumnsMetadataTtlMs,
 } from "../src/config.js";
 
 const BASE_ENV: Record<string, string> = {
@@ -23,6 +26,9 @@ function setEnv(extra: Record<string, string | undefined> = {}) {
   delete process.env.READ_ONLY_MODE;
   delete process.env.ENABLED_TOOLS;
   delete process.env.TOOLSETS;
+  delete process.env.CUSTOM_COLUMNS_MODE;
+  delete process.env.CUSTOM_COLUMNS_ALLOWLIST;
+  delete process.env.CUSTOM_COLUMNS_METADATA_TTL_MS;
   Object.assign(process.env, BASE_ENV);
   for (const [k, v] of Object.entries(extra)) {
     if (v === undefined) {
@@ -156,6 +162,57 @@ describe("getToolsets", () => {
   it("returns undefined for empty string", () => {
     setEnv({ TOOLSETS: "" });
     expect(getToolsets()).toBeUndefined();
+  });
+});
+
+describe("CUSTOM_COLUMNS_MODE", () => {
+  it("defaults to 'off' when unset", () => {
+    setEnv();
+    expect(getCustomColumnsMode()).toBe("off");
+  });
+
+  it("accepts 'metadata'", () => {
+    setEnv({ CUSTOM_COLUMNS_MODE: "metadata" });
+    expect(getCustomColumnsMode()).toBe("metadata");
+  });
+
+  it("accepts 'metadata+allowlist'", () => {
+    setEnv({ CUSTOM_COLUMNS_MODE: "metadata+allowlist" });
+    expect(getCustomColumnsMode()).toBe("metadata+allowlist");
+  });
+
+  it("rejects an invalid value", () => {
+    setEnv({ CUSTOM_COLUMNS_MODE: "bogus" });
+    expect(() => getEnv()).toThrow();
+  });
+});
+
+describe("CUSTOM_COLUMNS_ALLOWLIST", () => {
+  it("returns undefined when unset", () => {
+    setEnv();
+    expect(getCustomColumnsAllowlist()).toBeUndefined();
+  });
+
+  it("parses a comma-separated list and trims whitespace", () => {
+    setEnv({ CUSTOM_COLUMNS_ALLOWLIST: " new_riskscore , new_category " });
+    expect(getCustomColumnsAllowlist()).toEqual(["new_riskscore", "new_category"]);
+  });
+});
+
+describe("CUSTOM_COLUMNS_METADATA_TTL_MS", () => {
+  it("returns undefined when unset (no expiry)", () => {
+    setEnv();
+    expect(getCustomColumnsMetadataTtlMs()).toBeUndefined();
+  });
+
+  it("parses a positive integer", () => {
+    setEnv({ CUSTOM_COLUMNS_METADATA_TTL_MS: "60000" });
+    expect(getCustomColumnsMetadataTtlMs()).toBe(60000);
+  });
+
+  it("rejects a non-positive value", () => {
+    setEnv({ CUSTOM_COLUMNS_METADATA_TTL_MS: "0" });
+    expect(() => getEnv()).toThrow();
   });
 });
 

@@ -4,7 +4,8 @@ import { allTools, toolAnnotations } from "../src/tools/index.js";
 import type { ToolFilterEnv } from "../src/toolFilter.js";
 
 // Read-only tool names (14 original + 3 analytics tools + 2 member-info/user-task
-// tools added in feat/member-info-and-user-tasks + search_plan_tasks).
+// tools added in feat/member-info-and-user-tasks + search_plan_tasks + 2 custom-column
+// discovery tools added in feat/custom-columns).
 const READ_ONLY_TOOL_NAMES = new Set([
   "check_change_session_status",
   "find_plan_by_name",
@@ -23,6 +24,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "list_dependencies",
   "list_team_members",
   "describe_option_set",
+  "list_custom_columns",
+  "describe_columns",
   "get_critical_path",
   "get_schedule_health",
   "get_resource_workload",
@@ -146,12 +149,12 @@ describe("filterTools — TOOLSETS", () => {
     }
   });
 
-  it("discovery toolset returns 7 tools", () => {
+  it("discovery toolset returns 9 tools", () => {
     const { tools } = filterTools(allTools, toolAnnotations, {
       readOnly: false,
       toolsets: ["discovery"],
     });
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(9);
   });
 
   it("reporting + sessions union returns 13 tools (no duplicates)", () => {

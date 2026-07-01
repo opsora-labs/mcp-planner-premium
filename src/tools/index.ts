@@ -32,6 +32,8 @@ import { describeOptionSet } from "./describeOptionSet.js";
 import { getCriticalPath } from "./getCriticalPath.js";
 import { getScheduleHealth } from "./getScheduleHealth.js";
 import { getResourceWorkload } from "./getResourceWorkload.js";
+import { listCustomColumns } from "./listCustomColumns.js";
+import { describeColumns } from "./describeColumns.js";
 
 /**
  * All tools, in the natural workflow order. The 12 ports of the Langdock
@@ -70,6 +72,8 @@ export const allTools: ToolDef[] = [
   listDependencies,
   listTeamMembers,
   describeOptionSet,
+  listCustomColumns,
+  describeColumns,
   // Analytics tools (schedule & resource insights)
   getCriticalPath,
   getScheduleHealth,
@@ -105,6 +109,8 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   list_dependencies: RO,
   list_team_members: RO,
   describe_option_set: RO,
+  list_custom_columns: RO,
+  describe_columns: RO,
   get_critical_path: RO,
   get_schedule_health: RO,
   get_resource_workload: RO,
