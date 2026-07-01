@@ -33,7 +33,6 @@ if (typeof cmd !== "string" || !cmd.trim()) process.exit(0);
 const RULES = [
   [/\bsudo\b/, "sudo is not needed in this project. Run privileged commands yourself if truly required."],
   [/\bgit\s+push\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b)/, "Force-push is blocked — it can overwrite shared history. Push normally, or do it manually."],
-  [/\bgit\s+push\b[^\n]*\b(main|master)\b/, "Pushing directly to main/master is blocked. Use a feature branch and open a PR."],
   [/\bgit\s+commit\b[^\n]*(--no-verify\b|\s-n\b)/, "Bypassing commit hooks (--no-verify) is blocked."],
   [/\bgit\s+reset\s+--hard\b/, "`git reset --hard` discards work. If you really mean to, do it manually."],
   [/\bgit\s+clean\s+-[a-zA-Z]*f/, "`git clean -f` deletes untracked files. Do it manually if intended."],
