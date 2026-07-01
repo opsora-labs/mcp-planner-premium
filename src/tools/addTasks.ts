@@ -299,7 +299,10 @@ export const addTasks: ToolDef = {
     const operationSetId = (input.operationSetId || "").trim();
     if (!operationSetId) throw new Error("operationSetId is required.");
 
-    const entities = asArray(input.entities, "entities");
+    const entities = asArray(input.entities, "entities", {
+      example:
+        '[{"@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttask", "msdyn_subject": "..."}]',
+    });
     validateAddEntities(entities);
     // Additional, opt-in (CUSTOM_COLUMNS_MODE!=off) metadata-backed check for
     // any custom (non-msdyn_) key — see customColumnsGuard.ts. Runs AFTER the

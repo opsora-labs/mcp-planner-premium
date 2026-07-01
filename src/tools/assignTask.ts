@@ -116,8 +116,9 @@ export const assignTask: ToolDef = {
     assignees: z
       .union([z.string(), z.array(z.string())])
       .describe(
-        "Member display name(s) or teamMemberId GUID(s) to assign/unassign. " +
-          "Must already be on the plan's project team — unknown members are skipped with a warning.",
+        "Member display name(s) or teamMemberId GUID(s) to assign/unassign, as a real JSON array, e.g. [\"Alice\"]. " +
+          "A single bare name or a JSON-encoded string is also accepted, but prefer a native array. " +
+          "Members must already be on the plan's project team — unknown members are skipped with a warning.",
       ),
     mode: z
       .enum(["assign", "unassign"])
@@ -155,7 +156,10 @@ export const assignTask: ToolDef = {
       }
     }
 
-    const rawAssignees = asArray<string>(input.assignees, "assignees");
+    const rawAssignees = asArray<string>(input.assignees, "assignees", {
+      coerceScalar: true,
+      example: '["Alice", "bob@contoso.com"]',
+    });
     if (rawAssignees.length === 0) throw new Error("assignees must be a non-empty array.");
 
     // Resolve team members: one read per call, scoped to this plan's project team.

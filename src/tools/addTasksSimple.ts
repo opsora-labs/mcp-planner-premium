@@ -532,7 +532,11 @@ export const addTasksSimple: ToolDef = {
     projectId: z.string().describe("GUID of the plan all these tasks belong to."),
     tasks: z
       .union([z.string(), z.array(taskSchema)])
-      .describe("The tasks to add. A JSON array (or JSON string) of task objects."),
+      .describe(
+        "The tasks to add — a real JSON array of task objects, e.g. [{\"subject\":\"My task\"}]. " +
+          "A JSON-encoded string is also accepted for compatibility, but prefer a native array " +
+          "(it avoids truncation and parse errors).",
+      ),
   },
   handler: async (input: {
     operationSetId: string;
@@ -544,7 +548,9 @@ export const addTasksSimple: ToolDef = {
     const operationSetId = assertGuid(input.operationSetId, "operationSetId");
     const projectId = assertGuid(input.projectId, "projectId");
 
-    const tasks = asArray<SimpleTask>(input.tasks, "tasks");
+    const tasks = asArray<SimpleTask>(input.tasks, "tasks", {
+      example: '[{"subject": "My task"}]',
+    });
     if (tasks.length === 0) throw new Error("tasks must be a non-empty array.");
 
     // Normalise: coerce 'bucketId' alias into 'bucket' so the rest of the pipeline

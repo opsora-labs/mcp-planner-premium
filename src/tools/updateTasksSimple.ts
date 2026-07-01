@@ -364,7 +364,9 @@ export const updateTasksSimple: ToolDef = {
     const operationSetId = (input.operationSetId || "").trim();
     if (!operationSetId) throw new Error("operationSetId is required.");
 
-    const tasks = asArray<SimpleTaskUpdate>(input.tasks, "tasks");
+    const tasks = asArray<SimpleTaskUpdate>(input.tasks, "tasks", {
+      example: '[{"taskId": "<guid>", "subject": "New name"}]',
+    });
 
     // Resolve bucket names -> GUIDs for tasks that request a bucket move.
     const resolvedBucketIds = new Map<number, string>();
@@ -515,7 +517,10 @@ export const updateTasksSimple: ToolDef = {
           if (p) autoIds.add(String(p).toLowerCase());
         }
         // Merge auto-detected with any explicitly provided ids.
-        const explicit = asArray<string>(input.summaryTaskIds ?? [], "summaryTaskIds");
+        const explicit = asArray<string>(input.summaryTaskIds ?? [], "summaryTaskIds", {
+          coerceScalar: true,
+          example: '["<taskId-guid>"]',
+        });
         for (const id of explicit) autoIds.add(id.toLowerCase());
         effectiveSummaryIds = [...autoIds];
       }

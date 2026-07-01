@@ -229,7 +229,10 @@ export const deleteTasks: ToolDef = {
     // so we can sort them leaves-first if projectId is provided.
     let taskIdList: string[] = [];
     if (input.taskIds !== undefined && input.taskIds !== null) {
-      taskIdList = asArray<string>(input.taskIds, "taskIds");
+      taskIdList = asArray<string>(input.taskIds, "taskIds", {
+        coerceScalar: true,
+        example: '["<taskId-guid>", "<taskId-guid>"]',
+      });
     }
 
     // Auto-sort task IDs leaves-first when projectId is provided.
@@ -324,6 +327,10 @@ export const deleteTasks: ToolDef = {
       const raw = asArray<{ entityLogicalName: string; recordId: string }>(
         input.records,
         "records",
+        {
+          example:
+            '[{"entityLogicalName": "msdyn_projecttask", "recordId": "<guid>"}]',
+        },
       );
       for (const r of raw) {
         // Skip if the auto-cascade already queued this dep id (de-dupe).

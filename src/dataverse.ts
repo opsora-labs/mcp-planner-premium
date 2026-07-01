@@ -218,8 +218,31 @@ export function throwIfPssCreateError(response: DvResponse): void {
   throw new Error("pss_create_batch failed (" + response.status + "): " + msg);
 }
 
-/** Parses an input that may arrive as a JSON string or as a real array. */
-export function asArray<T = any>(input: unknown, label: string): T[] {
+export interface AsArrayOptions {
+  /**
+   * Treat a bare, non-JSON string as a single-element array — e.g. "Alice" -> ["Alice"].
+   * Enable for string-LIST params (names, ids, labels) where a lone value is an
+   * unambiguous one-item list. Do NOT enable for object-array params like
+   * `tasks`/`entities`, where a bare string should surface a clear error instead of
+   * being wrapped into a bogus one-element array.
+   */
+  coerceScalar?: boolean;
+  /** Example array shown in the error message, e.g. '["Alice", "Bob"]'. */
+  example?: string;
+}
+
+/**
+ * Parses an input that may arrive as a real array or as a JSON-encoded string.
+ * Prefer passing a NATIVE array from the MCP client — the string form is only a
+ * compatibility fallback for hosts that stringify structured params, and is the
+ * usual source of "not valid JSON" / truncated-array errors.
+ */
+export function asArray<T = any>(
+  input: unknown,
+  label: string,
+  opts: AsArrayOptions = {},
+): T[] {
+  const example = opts.example ?? '["item1", "item2"]';
   let value: unknown = input;
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -227,11 +250,26 @@ export function asArray<T = any>(input: unknown, label: string): T[] {
     try {
       value = JSON.parse(trimmed);
     } catch (e: unknown) {
-      throw new Error(`${label} must be a JSON array: ${errMessage(e)}`);
+      // A bare, non-JSON scalar (e.g. `Alice`) is an unambiguous single-item list.
+      // But if it LOOKS like JSON (starts with [ { or ") yet failed to parse, it is a
+      // malformed array/object — surface the error rather than wrapping the raw text.
+      if (opts.coerceScalar && !/^[[{"]/.test(trimmed)) {
+        return [trimmed as unknown as T];
+      }
+      throw new Error(
+        `${label} must be a JSON array (e.g. ${example}). The value received was a ` +
+          `string that is not valid JSON — if your MCP client can send structured ` +
+          `input, pass a real array rather than a JSON-encoded string. Parse error: ` +
+          errMessage(e),
+      );
     }
   }
   if (!Array.isArray(value)) {
-    throw new Error(`${label} must be a JSON array.`);
+    // Parsed/passed to a lone scalar (e.g. "Alice" or 5) — wrap it when coercion is on.
+    if (opts.coerceScalar && value != null && typeof value !== "object") {
+      return [value as T];
+    }
+    throw new Error(`${label} must be a JSON array (e.g. ${example}).`);
   }
   return value as T[];
 }
